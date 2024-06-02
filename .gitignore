@@ -1,0 +1,78 @@
+
+# Logs
+logs
+*.log
+
+# Dependency directories
+node_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional build output directory
+dist
+
+# Optional build output of the client-side bundler
+build
+
+# Optional next.js build output
+.next
+
+# Optional nuxt.js build / generate output
+.nuxt
+
+# Optional vue-cli build output
+.vue-cli-output
+
+# Optional webpack output
+build
+
+# Optional jest test results
+/test-results
+
+# Optional Storybook output
+.storybook
+
+# Optional Docz output
+.docz
+
+# Optional Gatsby cache
+.cache
+
+# Optional Next.js build manifest
+.next/build-manifest.json
+
+# Optional Next.js auto-export manifest
+.next/routes-manifest.json
+
+# Optional Parcel cache
+.cache
+
+# Optional Nuxt PWA cache
+client/
+
+# Optional vue-cli config
+.env
+.env.*
+
+# Optional .env for next.js
+.env.local
+.env.development.local
+.env.production.local
+
+# Optional .env for nuxt.js
+.env.development.local
+.env.production.local
+.env.test.local
+
+# Optional .env for vue-cli
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

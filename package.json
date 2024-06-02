@@ -1,0 +1,35 @@
+{
+  "name": "nth",
+  "version": "0.0.1",
+  "description": "A bot that turns bitcoin blocks into hyperjump objects for the Nakamoto Thermodynamic Hypertransit in cyberspace.",
+  "main": "index.js",
+  "repository": "https://github.com/arkin0x/nth",
+  "author": "arkin0x <npub1arkn0xxxll4llgy9qxkrncn3vc4l69s0dz8ef3zadykcwe7ax3dqrrh43w>",
+  "license": "Creative Commons Attribution-ShareAlike 4.0 International: https://creativecommons.org/licenses/by-sa/4.0/legalcode",
+  "private": false,
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.5",
+    "nikabrik": "^0.0.6",
+    "pocketbase": "^0.21.3",
+    "three": "^0.165.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.13.0",
+    "@types/ws": "^8.5.10",
+    "concurrently": "^8.2.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "start": "concurrently \"npm:db*\" \"npm:build\" \"npm: run\"",
+    "db": ".\\bin\\pocketbase serve",
+    "db-ui": "start http://127.0.0.1:8090/_/",
+    "build": "tsc",
+    "run": "node ./dist/index.js",
+    "test": "tsc && node ./dist/index.js"
+  }
+}
