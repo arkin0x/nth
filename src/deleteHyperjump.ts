@@ -36,7 +36,7 @@ const relayUrl = 'wss://cyberspace.nostr1.com';
 
 const pool = new SimplePool();
 
-const oldHyperjumps = pool.sub([relayUrl], [{kinds: [321], until: 1717299664}]);
+const oldHyperjumps = pool.sub([relayUrl], [{kinds: [321]}]);
 
 oldHyperjumps.on('event', deleteEvent)
 
