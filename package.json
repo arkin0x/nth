@@ -30,6 +30,7 @@
     "db-ui": "start http://127.0.0.1:8090/_/",
     "build": "tsc",
     "run": "node ./dist/index.js",
-    "test": "tsc && node ./dist/index.js"
+    "test": "tsc && node ./dist/index.js",
+    "delete": "tsc && node ./dist/deleteHyperjump.js"
   }
 }
