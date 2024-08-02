@@ -1,11 +1,9 @@
 import dotenv from 'dotenv';
-import axios from 'axios';
 import PocketBase from 'pocketbase';
-import type { UnsignedEvent, Event } from 'nostr-tools';
-import { generatePrivateKey, getPublicKey, getEventHash, getSignature, SimplePool } from 'nostr-tools';
-import { getSectorIdFromCoordinate, getSectorId } from './lib/util.js';
+import { generatePrivateKey, SimplePool } from 'nostr-tools';
 import { writeFileSync } from 'fs';
 import WebSocket from 'ws';
+import { processBlock } from './processBlock.js';
 
 if (!global.WebSocket) {
   global.WebSocket = WebSocket as any
@@ -18,7 +16,7 @@ async function authPB() {
   await pb.admins.authWithPassword(process.env.POCKETBASE_USER, process.env.POCKETBASE_PASS);
 }
 
-console.log(pb)
+// console.log(pb)
 
 // Nostr relay URL
 const relayUrl = 'wss://cyberspace.nostr1.com';
@@ -35,107 +33,53 @@ if (!process.env.PRIVATE_KEY) {
 
 const pool = new SimplePool();
 
-async function processBlock(blockHeight: number) {
+async function getHighestBlockHeight(): Promise<number> {
   try {
-    // Fetch block hash by height
-    const blockHashResponse = await axios.get(`https://blockstream.info/api/block-height/${blockHeight}`);
-    const blockHash = blockHashResponse.data;
+    const records = await pb.collection('hyperjumps').getList(1, 5, {
+      sort: '-blockHeight',
+    });
 
-    // check if the response is valid
-    // the API will respond with Invalid number if the block height is invalid.
-    if (blockHash === 'Invalid number') {
-      // try again in 5 minutes
-      setTimeout(() => {
-        processBlock(blockHeight);
-      }, 300000);
-      return;
+    if (records.items.length === 0) {
+      console.log('No blocks found. Returning -1 (next block to fetch: 0)');
+      return -1;
     }
 
-    // Fetch block header
-    const blockHeaderResponse = await axios.get(`https://blockstream.info/api/block/${blockHash}/header`);
-    const blockHeader = blockHeaderResponse.data;
+    // Log the top 5 block heights for debugging
+    console.log('Top 5 block heights:');
+    records.items.forEach((item, index) => {
+      console.log(`${index + 1}: ${item.blockHeight}`);
+    });
 
-    // Extract merkle root from block header
-    const merkleRoot = extractMerkleRoot(blockHeader);
+    // Get the maximum block height
+    const highest = Math.max(...records.items.map(item => {
+      const height = Number(item.blockHeight);
+      if (isNaN(height)) {
+        console.warn(`Invalid block height found: ${item.blockHeight}`);
+        return -1; // Use -1 for invalid heights
+      }
+      return height;
+    }));
 
-    // Extract previous block hash from block header
-    const prevBlockHash = extractPrevBlockHash(blockHeader);
-
-    // Fetch next block hash
-    const nextBlockHashResponse = await axios.get(`https://blockstream.info/api/block-height/${blockHeight + 1}`);
-    const nextBlockHash = nextBlockHashResponse.data;
-
-    if (nextBlockHash === 'Invalid number') {
-      // next block hasn't been mined yet. try again in 5 minutes
-      setTimeout(() => {
-        processBlock(blockHeight);
-      }, 300000);
-      return;
+    if (highest === -1) {
+      console.warn('No valid block heights found in existing records');
+      return -1; // Return -1 if all existing records are invalid
     }
 
-    // Store block data in PocketBase
-    const blockData = {
-      blockHeight,
-      blockHash,
-      prevBlockHash,
-      nextBlockHash,
-      merkleRoot,
-    };
-
-    const record = await pb.collection('hyperjumps').create(blockData);
-
-    console.log('pb db record:', record)
-
-    // Publish nostr event
-    const event = {
-      kind: 321,
-      pubkey: getPublicKey(process.env.PRIVATE_KEY as string),
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['C', merkleRoot],
-        ['S', getSectorId(getSectorIdFromCoordinate(merkleRoot))],
-        ['H', blockHash],
-        ['P', prevBlockHash],
-        ['N', nextBlockHash],
-        ['B', blockHeight.toString()],
-      ],
-      content: `Block ${blockHeight}`,
-    } as UnsignedEvent;
-    const id = getEventHash(event);
-    const signedEvent = { ...event, id } as Event;
-    const sig = getSignature(event, process.env.PRIVATE_KEY as string);
-    signedEvent.sig = sig
-    pool.publish([relayUrl], signedEvent)
-
-    // update record in pocketbase with event id (column eventId)
-    await pb.collection('hyperjumps').update(record.id, { eventId: id });
-
-    console.log(`Processed block ${blockHeight}`);
+    console.log(`Highest block in database: ${highest}, returning ${highest} (next block to fetch: ${highest + 1})`);
+    return highest;
   } catch (error) {
-    console.error(`Error processing block ${blockHeight}:`, error);
+    console.error('Error fetching highest block height:', error);
+    // In case of any error, we'll return -1
+    console.log('Returning -1 due to error (next block to fetch: 0)');
+    return -1;
   }
-}
-
-function extractMerkleRoot(blockHeader: string) {
-  if (!/^[0-9a-fA-F]+$/.test(blockHeader) || blockHeader.length !== 160) {
-    throw new Error('Invalid block header format');
-  }
-  return blockHeader.substring(72, 136);
-}
-
-function extractPrevBlockHash(blockHeader: string) {
-  if (!/^[0-9a-fA-F]+$/.test(blockHeader) || blockHeader.length !== 160) {
-    throw new Error('Invalid block header format');
-  }
-  const prevBlockHashLE = blockHeader.substring(4, 68);
-  return prevBlockHashLE.match(/.{2}/g)!.reverse().join('');
 }
 
 async function main() {
   await authPB();
-  let blockHeight = 0;
+  let blockHeight = await getHighestBlockHeight();
   while (true) {
-    await processBlock(blockHeight);
+    await processBlock(blockHeight+1, pb, relayUrl, pool, 8); // 8 retries with exponential backoff is 4.2 minutes
     blockHeight++;
   }
 }
