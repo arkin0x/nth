@@ -79,7 +79,7 @@ async function main() {
   await authPB();
   let blockHeight = await getHighestBlockHeight();
   while (true) {
-    await processBlock(blockHeight+1, pb, relayUrl, pool, 8); // 8 retries with exponential backoff is 4.2 minutes
+    await processBlock(blockHeight+1, pb, relayUrl, pool, 12); // 8 retries with exponential backoff is 4.2 minutes
     blockHeight++;
   }
 }
