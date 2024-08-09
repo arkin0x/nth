@@ -1,7 +1,7 @@
 {
   "name": "nth",
   "version": "0.0.1",
-  "description": "A bot that turns bitcoin blocks into hyperjump objects for the Nakamoto Thermodynamic Hypertransit in cyberspace.",
+  "description": "A program that turns bitcoin blocks into nostr-based hyperjump objects for the Nakamoto Thermodynamic Hypertransit in cyberspace.",
   "main": "index.js",
   "repository": "https://github.com/arkin0x/nth",
   "author": "arkin0x <npub1arkn0xxxll4llgy9qxkrncn3vc4l69s0dz8ef3zadykcwe7ax3dqrrh43w>",
@@ -26,7 +26,7 @@
   },
   "scripts": {
     "start": "concurrently \"npm:db*\" \"npm:build\" \"npm: run\"",
-    "db": ".\\bin\\pocketbase serve",
+    "db": "./bin/pocketbase serve",
     "db-ui": "start http://127.0.0.1:8090/_/",
     "build": "tsc",
     "run": "node ./dist/index.js",
