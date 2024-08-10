@@ -28,6 +28,7 @@
     "start": "concurrently \"npm:db*\" \"npm:build\" \"npm: run\"",
     "db": "./bin/pocketbase serve",
     "db-ui": "start http://127.0.0.1:8090/_/",
+    "check": "tsc && node ./dist/checkMissing.js",
     "build": "tsc",
     "run": "node ./dist/index.js",
     "test": "tsc && node ./dist/index.js",
