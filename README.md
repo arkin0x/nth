@@ -1,5 +1,5 @@
 # nth
-`nth` is a Node/TypeScript publisher that turns Bitcoin blocks into Nostr-based “hyperjump” objects for the Nakamoto Thermodynamic Hypertransit (NTH) in cyberspace.
+`nth` is a Node/TypeScript publisher that turns Bitcoin blocks into Nostr-based “hyperjump” objects for the Nakamoto Thermodynamic Hypertransit (NTH) in [cyberspace](https://github.com/arkin0x/cyberspace).
 
 For each block height, it:
 - Fetches block data from an Esplora-compatible Bitcoin API (default: mempool.space)
