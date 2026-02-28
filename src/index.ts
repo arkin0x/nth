@@ -1,86 +1,135 @@
 import dotenv from 'dotenv';
-import PocketBase from 'pocketbase';
-import { generatePrivateKey, SimplePool } from 'nostr-tools';
-import { writeFileSync } from 'fs';
 import WebSocket from 'ws';
+
+import { getPublicKey, SimplePool } from 'nostr-tools';
+
+import { createBitcoinApi, getBitcoinApiBaseUrlFromEnv } from './lib/bitcoin.js';
+import { loadOrCreatePrivateKey } from './lib/privateKey.js';
+import { DEFAULT_RELAY, getLatestPublishedHeight } from './lib/nostr.js';
 import { processBlock } from './processBlock.js';
 
 if (!global.WebSocket) {
-  global.WebSocket = WebSocket as any
+  global.WebSocket = WebSocket as any;
 }
 
-// Initialize PocketBase client
-const pb = new PocketBase('http://127.0.0.1:8090');
-
-async function authPB() {
-  await pb.admins.authWithPassword(process.env.POCKETBASE_USER, process.env.POCKETBASE_PASS);
-}
-
-// console.log(pb)
-
-// Nostr relay URL
-const relayUrl = 'wss://cyberspace.nostr1.com';
-
-// Nostr private key for signing events (replace with your own)
 dotenv.config();
 
-if (!process.env.PRIVATE_KEY) {
-  const privateKey = generatePrivateKey();
-  console.log(`Generated new private key: ${privateKey}`);
-  process.env.PRIVATE_KEY = privateKey;
-  writeFileSync('.env', `PRIVATE_KEY=${privateKey}\n`);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const pool = new SimplePool();
+function parseIntEnv(name: string, defaultValue: number): number {
+  const raw = (process.env[name] || '').trim();
+  if (!raw) return defaultValue;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : defaultValue;
+}
 
-async function getHighestBlockHeight(): Promise<number> {
-  try {
-    const records = await pb.collection('hyperjumps').getList(1, 5, {
-      sort: '-blockHeight',
-    });
+function parseStartHeightFromEnv(): number | null {
+  const raw = (process.env.NTH_START_HEIGHT || '').trim();
+  if (!raw) return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
 
-    if (records.items.length === 0) {
-      console.log('No blocks found. Returning -1 (next block to fetch: 0)');
-      return -1;
-    }
+function computeBackoffMs(attempt: number, opts: { baseMs: number; maxMs: number }): number {
+  const pow = Math.min(attempt, 30); // prevent overflow
+  const ms = Math.min(opts.baseMs * Math.pow(2, pow), opts.maxMs);
 
-    // Log the top 5 block heights for debugging
-    console.log('Top 5 block heights:');
-    records.items.forEach((item, index) => {
-      console.log(`${index + 1}: ${item.blockHeight}`);
-    });
-
-    // Get the maximum block height
-    const highest = Math.max(...records.items.map(item => {
-      const height = Number(item.blockHeight);
-      if (isNaN(height)) {
-        console.warn(`Invalid block height found: ${item.blockHeight}`);
-        return -1; // Use -1 for invalid heights
-      }
-      return height;
-    }));
-
-    if (highest === -1) {
-      console.warn('No valid block heights found in existing records');
-      return -1; // Return -1 if all existing records are invalid
-    }
-
-    console.log(`Highest block in database: ${highest}, returning ${highest} (next block to fetch: ${highest + 1})`);
-    return highest;
-  } catch (error) {
-    console.error('Error fetching highest block height:', error);
-    // In case of any error, we'll return -1
-    console.log('Returning -1 due to error (next block to fetch: 0)');
-    return -1;
-  }
+  // small jitter to avoid synchronizing with other clients
+  const jitter = 0.2;
+  const rand = 1 - jitter + Math.random() * (2 * jitter);
+  return Math.max(0, Math.floor(ms * rand));
 }
 
 async function main() {
-  await authPB();
-  let blockHeight = await getHighestBlockHeight();
+  const keySource = loadOrCreatePrivateKey();
+  const privateKey = keySource.key;
+  const pubkey = getPublicKey(privateKey);
+
+  const relay = (process.env.NTH_RELAY || DEFAULT_RELAY).trim() || DEFAULT_RELAY;
+
+  const bitcoinApi = createBitcoinApi(getBitcoinApiBaseUrlFromEnv());
+  const pool = new SimplePool();
+
+  console.log(`Using relay: ${relay}`);
+  console.log(`Using bitcoin API: ${bitcoinApi.baseUrl}`);
+  console.log(`Publisher pubkey: ${pubkey}`);
+  if (keySource.type === 'generated') {
+    console.log(`Generated new private key at ${keySource.path}`);
+  } else if (keySource.type === 'file') {
+    console.log(`Loaded private key from ${keySource.path}`);
+  } else {
+    console.log(`Loaded private key from environment`);
+  }
+
+  const publishDelayMs = parseIntEnv('NTH_PUBLISH_DELAY_MS', 200);
+  const notMinedDelayMs = parseIntEnv('NTH_NOT_MINED_DELAY_MS', 300_000);
+  const backoffBaseMs = parseIntEnv('NTH_ERROR_BACKOFF_BASE_MS', 1_000);
+  const backoffMaxMs = parseIntEnv('NTH_ERROR_BACKOFF_MAX_MS', 300_000);
+
+  const startHeightOverride = parseStartHeightFromEnv();
+  const latestHeight = await getLatestPublishedHeight({ pool, relays: [relay], pubkey });
+
+  const startHeight = startHeightOverride ?? latestHeight + 1;
+  console.log(`Starting from block height ${startHeight}`);
+  console.log(`Publish delay: ${publishDelayMs}ms`);
+
+  let blockHeight = startHeight;
+  let currentHash: string | null = null;
+  let nextHash: string | null = null;
+  let consecutiveErrors = 0;
+
   while (true) {
-    await processBlock(blockHeight+1, pb, relayUrl, pool, 12); // 8 retries with exponential backoff is 4.2 minutes
-    blockHeight++;
+    try {
+      if (!currentHash) {
+        currentHash = await bitcoinApi.getBlockHashByHeight(blockHeight);
+      }
+
+      if (!currentHash) {
+        // 404 only
+        console.log(`Block ${blockHeight} not found yet (404). Retrying in ${notMinedDelayMs}ms.`);
+        await sleep(notMinedDelayMs);
+        continue;
+      }
+
+      if (!nextHash) {
+        nextHash = await bitcoinApi.getBlockHashByHeight(blockHeight + 1);
+      }
+
+      if (!nextHash) {
+        // 404 only
+        console.log(`Block ${blockHeight + 1} not mined yet (404). Retrying in ${notMinedDelayMs}ms.`);
+        await sleep(notMinedDelayMs);
+        continue;
+      }
+
+      await processBlock({
+        blockHeight,
+        blockHash: currentHash,
+        nextBlockHash: nextHash,
+        bitcoin: bitcoinApi,
+        relay,
+        pool,
+        privateKey,
+      });
+
+      consecutiveErrors = 0;
+
+      await sleep(publishDelayMs);
+
+      blockHeight++;
+      currentHash = nextHash;
+      nextHash = null;
+    } catch (error) {
+      consecutiveErrors++;
+      const delayMs = computeBackoffMs(consecutiveErrors, { baseMs: backoffBaseMs, maxMs: backoffMaxMs });
+
+      console.error(`Error at height ${blockHeight} (consecutive ${consecutiveErrors}):`, error);
+      console.log(`Backing off for ${delayMs}ms...`);
+
+      await sleep(delayMs);
+    }
   }
 }
 

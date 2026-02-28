@@ -61,6 +61,9 @@ client/
 .env
 .env.*
 
+# nth local state
+.nth/
+
 # Optional .env for next.js
 .env.local
 .env.development.local
@@ -76,3 +79,6 @@ client/
 .env.development.local
 .env.test.local
 .env.production.local
+
+# PocketBase local data (do not commit)
+bin/pb_data/
