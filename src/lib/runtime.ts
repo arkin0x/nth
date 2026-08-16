@@ -33,14 +33,39 @@ function ensureDir(filePath: string): void {
 /* Single-instance lock                                                */
 /* ------------------------------------------------------------------ */
 
-function processAlive(pid: number): boolean {
+/**
+ * Is this pid a live publisher?
+ *
+ * `kill(pid, 0)` is not sufficient: it succeeds for zombies, and pid 1 in this
+ * container does not reap, so dead publishers linger as `<defunct>` entries
+ * indefinitely. Treating a zombie as alive makes the lock permanent and the
+ * bashrc autostart a silent no-op forever.
+ *
+ * Reading /proc also lets us confirm the pid is still the process we started,
+ * which guards against pid reuse after a wrap-around.
+ */
+function processAlive(pid: number, expectCmdlineSubstring?: string): boolean {
   try {
-    // Signal 0 performs error checking without actually sending a signal.
-    process.kill(pid, 0);
-    return true;
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // "pid (comm) state ..." -- comm may contain spaces and parentheses, so
+    // split on the last ')' rather than by whitespace.
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 1).trim();
+    const state = afterComm.split(/\s+/)[0];
+    if (state === 'Z') return false;
   } catch {
-    return false;
+    return false; // no /proc entry: the process is gone
   }
+
+  if (expectCmdlineSubstring) {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+      if (!cmdline.includes(expectCmdlineSubstring)) return false;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -58,11 +83,11 @@ export function acquireLock(role: Role): void {
     const raw = readFileSync(lock, 'utf8').trim();
     const pid = Number.parseInt(raw, 10);
 
-    if (Number.isFinite(pid) && processAlive(pid)) {
+    if (Number.isFinite(pid) && processAlive(pid, 'index.js')) {
       throw new Error(`nth:${role} already running as pid ${pid} (lock ${lock})`);
     }
 
-    // Stale lock from a killed process; reclaim it.
+    // Stale lock from a killed or zombied process; reclaim it.
     console.log(`Reclaiming stale lock ${lock} (pid ${raw || 'unknown'} is gone)`);
   }
 
