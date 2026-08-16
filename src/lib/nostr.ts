@@ -24,6 +24,67 @@ export function getTagValue(event: Event, tagName: string): string | null {
   return null;
 }
 
+/** True if this author has already published an anchor for exactly this height. */
+async function hasHeight(opts: {
+  pool: SimplePool;
+  relays: string[];
+  pubkey: string;
+  height: number;
+}): Promise<boolean> {
+  const { pool, relays, pubkey, height } = opts;
+
+  const events = await pool.list(relays, [
+    {
+      kinds: [321],
+      authors: [pubkey],
+      '#B': [String(height)],
+      limit: 1,
+    },
+  ]);
+
+  return events.length > 0;
+}
+
+/**
+ * Find the highest contiguous published height by probing the indexed `B` tag.
+ *
+ * Resuming from "the most recent event" is unsound for this corpus: a restart
+ * that re-publishes low blocks makes the newest event by `created_at` the
+ * *lowest* height, not the highest. In practice the relay's newest kind 321 is
+ * block 43,989 while the actual frontier is 943,181. Single-letter tags are
+ * indexed per NIP-01, so an exponential probe followed by a binary search finds
+ * the true frontier in O(log n) queries regardless of publish order.
+ *
+ * Returns -1 when this author has published nothing at all.
+ */
+export async function findFrontierHeight(opts: {
+  pool: SimplePool;
+  relays: string[];
+  pubkey: string;
+}): Promise<number> {
+  const probe = (height: number) => hasHeight({ ...opts, height });
+
+  if (!(await probe(0))) return -1;
+
+  // Exponential search for an absent height to bound the binary search.
+  let lo = 0;
+  let hi = 1;
+  while (await probe(hi)) {
+    lo = hi;
+    hi *= 2;
+    if (hi > 100_000_000) break; // far beyond any plausible block height
+  }
+
+  // Invariant: lo is present, hi is absent.
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (await probe(mid)) lo = mid;
+    else hi = mid;
+  }
+
+  return lo;
+}
+
 export async function getLatestPublishedHeight(opts: {
   pool: SimplePool;
   relays: string[];

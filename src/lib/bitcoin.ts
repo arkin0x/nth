@@ -18,6 +18,7 @@ export class BitcoinApiError extends Error {
 
 export type BitcoinApi = {
   baseUrl: string;
+  getTipHeight(): Promise<number>;
   getBlockHashByHeight(height: number): Promise<string | null>; // null => 404 only
   getBlockByHash(hash: string, opts?: { heightHint?: number }): Promise<{
     hash: string;
@@ -70,6 +71,28 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
 
   return {
     baseUrl: normalizedBaseUrl,
+
+    async getTipHeight(): Promise<number> {
+      const url = `${normalizedBaseUrl}/blocks/tip/height`;
+      const { status, data } = await getText(url);
+
+      if (status < 200 || status >= 300 || !/^\d+$/.test(data)) {
+        logBitcoinApiError({
+          op: 'tip-height',
+          url,
+          status,
+          message: 'Unexpected response for blocks/tip/height',
+          bodySnippet: data,
+        });
+        throw new BitcoinApiError(`Bitcoin API returned HTTP ${status} for blocks/tip/height`, {
+          url,
+          status,
+          body: data,
+        });
+      }
+
+      return Number.parseInt(data, 10);
+    },
 
     async getBlockHashByHeight(height: number): Promise<string | null> {
       const url = `${normalizedBaseUrl}/block-height/${height}`;

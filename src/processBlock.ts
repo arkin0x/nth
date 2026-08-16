@@ -11,6 +11,15 @@ function findTag(tags: string[][], name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * DECK-0001 specifies C/H/P/N as lowercase hex. Esplora implementations already
+ * return lowercase, but normalizing here makes the corpus canonical regardless
+ * of which backend produced it -- consumers compare these values as strings.
+ */
+function lc(hex: string): string {
+  return hex.trim().toLowerCase();
+}
+
 export async function processBlock(opts: {
   blockHeight: number;
   blockHash: string;
@@ -19,13 +28,16 @@ export async function processBlock(opts: {
   relay: string;
   pool: { publish: (relays: string[], event: Event) => unknown };
   privateKey: string;
+  network?: string;
+  onSigned?: (event: Event) => void;
 }): Promise<string> {
-  const { blockHeight, blockHash, nextBlockHash, bitcoin, relay, pool, privateKey } = opts;
+  const { blockHeight, blockHash, nextBlockHash, bitcoin, relay, pool, privateKey, onSigned } = opts;
+  const network = opts.network || 'mainnet';
 
   const block = await bitcoin.getBlockByHash(blockHash, { heightHint: blockHeight });
 
-  // C tag is merkle root (32-byte hex) per your protocol.
-  const merkleRoot = block.merkleRoot;
+  // C tag is merkle root (32-byte hex) per DECK-0001.
+  const merkleRoot = lc(block.merkleRoot);
 
   const sector = coordHexToSector(merkleRoot);
   const sectorTags = sectorToTags(sector);
@@ -37,10 +49,13 @@ export async function processBlock(opts: {
     tags: [
       ['C', merkleRoot],
       ...sectorTags,
-      ['H', blockHash],
-      ['P', block.prevBlockHash ?? '0'.repeat(64)],
-      ['N', nextBlockHash],
+      ['H', lc(blockHash)],
+      ['P', block.prevBlockHash ? lc(block.prevBlockHash) : '0'.repeat(64)],
+      ['N', lc(nextBlockHash)],
       ['B', blockHeight.toString()],
+      // DECK-0001: anchor events SHOULD declare the Bitcoin network they bind to.
+      // Absent this, verifiers must assume mainnet.
+      ['net', network],
     ],
     content: `Block ${blockHeight}`,
   };
@@ -56,6 +71,10 @@ export async function processBlock(opts: {
   const id = getEventHash(event);
   const sig = getSignature(event, privateKey);
   const signedEvent: Event = { ...event, id, sig };
+
+  // Archive before publishing. The local corpus is the durable artifact; a relay
+  // that drops or rejects the event must not cost us the signed copy.
+  onSigned?.(signedEvent);
 
   const pubs = pool.publish([relay], signedEvent) as unknown;
   if (Array.isArray(pubs)) {
