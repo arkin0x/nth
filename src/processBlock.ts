@@ -3,6 +3,7 @@ import { getEventHash, getPublicKey, getSignature } from 'nostr-tools';
 
 import type { BitcoinApi } from './lib/bitcoin.js';
 import { coordHexToSector, sectorToTags } from './lib/cyberspace.js';
+import { landfallCoordHex, planeOfMerkleRoot } from './lib/landfall.js';
 
 function findTag(tags: string[][], name: string): string | undefined {
   for (const tag of tags) {
@@ -36,10 +37,16 @@ export async function processBlock(opts: {
 
   const block = await bitcoin.getBlockByHash(blockHash, { heightHint: blockHeight });
 
-  // C tag is merkle root (32-byte hex) per DECK-0001.
   const merkleRoot = lc(block.merkleRoot);
 
-  const sector = coordHexToSector(merkleRoot);
+  // DECK-0001 v3 §1: the merkle root's plane bit decides the stop kind.
+  // Plane 1 is a port in ideaspace at the root coordinate; plane 0 is a
+  // landfall on the WGS84 surface at a point the BLOCK HASH picks (the hash
+  // cannot be steered by a miner; the root can). C is the stop coordinate,
+  // M is always the merkle root.
+  const stopCoord = planeOfMerkleRoot(merkleRoot) === 1 ? merkleRoot : landfallCoordHex(lc(blockHash));
+
+  const sector = coordHexToSector(stopCoord);
   const sectorTags = sectorToTags(sector);
 
   const event: UnsignedEvent = {
@@ -47,7 +54,8 @@ export async function processBlock(opts: {
     pubkey: getPublicKey(privateKey),
     created_at: Math.floor(Date.now() / 1000),
     tags: [
-      ['C', merkleRoot],
+      ['C', stopCoord],
+      ['M', merkleRoot],
       ...sectorTags,
       ['H', lc(blockHash)],
       ['P', block.prevBlockHash ? lc(block.prevBlockHash) : '0'.repeat(64)],
