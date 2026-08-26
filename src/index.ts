@@ -6,6 +6,7 @@ import { getPublicKey, SimplePool } from 'nostr-tools';
 import { createBitcoinApi, getBitcoinApiBaseUrlFromEnv } from './lib/bitcoin.js';
 import { loadOrCreatePrivateKey } from './lib/privateKey.js';
 import { DEFAULT_RELAY, findFrontierHeight } from './lib/nostr.js';
+import { connectPublisher } from './lib/publisher.js';
 import { acquireLock, appendArchive, readState, writeState, NTH_HOME, type Role } from './lib/runtime.js';
 import { processBlock } from './processBlock.js';
 
@@ -132,6 +133,11 @@ async function main() {
   // role owns, so the two roles never publish the same height.
   const stopAt = role === 'backfill' ? parseIntEnv('NTH_STOP_HEIGHT', -1) : Number.MAX_SAFE_INTEGER;
 
+  // Authenticate before the first read. This relay's `auth_required` covers REQ
+  // as well as EVENT, and the challenge is sent once per socket, so the frontier
+  // probe must not be what opens it.
+  const publisher = await connectPublisher({ pool, url: relay, privateKey });
+
   const startHeight = await resolveStartHeight({ role, pool, relays: [relay], pubkey });
 
   console.log(`Publish delay: ${publishDelayMs}ms`);
@@ -195,14 +201,15 @@ async function main() {
         blockHash: currentHash,
         nextBlockHash: nextHash,
         bitcoin: bitcoinApi,
-        relay,
-        pool,
+        publish: publisher.publish,
         privateKey,
         network,
         onSigned: (event) => appendArchive(role, event),
       });
 
-      // Advance the durable resume point only after the event is archived.
+      // Advance the durable resume point only after the relay accepted the
+      // event. processBlock throws on rejection, so a refused block is retried
+      // here rather than skipped over.
       writeState(role, blockHeight + 1);
 
       consecutiveErrors = 0;

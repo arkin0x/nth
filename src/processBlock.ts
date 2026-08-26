@@ -26,13 +26,13 @@ export async function processBlock(opts: {
   blockHash: string;
   nextBlockHash: string;
   bitcoin: BitcoinApi;
-  relay: string;
-  pool: { publish: (relays: string[], event: Event) => unknown };
+  /** Resolves only when the relay accepted the event; throws with its reason otherwise. */
+  publish: (event: Event) => Promise<void>;
   privateKey: string;
   network?: string;
   onSigned?: (event: Event) => void;
 }): Promise<string> {
-  const { blockHeight, blockHash, nextBlockHash, bitcoin, relay, pool, privateKey, onSigned } = opts;
+  const { blockHeight, blockHash, nextBlockHash, bitcoin, publish, privateKey, onSigned } = opts;
   const network = opts.network || 'mainnet';
 
   const block = await bitcoin.getBlockByHash(blockHash, { heightHint: blockHeight });
@@ -84,10 +84,11 @@ export async function processBlock(opts: {
   // that drops or rejects the event must not cost us the signed copy.
   onSigned?.(signedEvent);
 
-  const pubs = pool.publish([relay], signedEvent) as unknown;
-  if (Array.isArray(pubs)) {
-    await Promise.allSettled(pubs);
-  }
+  // Only the relay's OK counts as published. The previous version awaited a
+  // Promise.allSettled and then logged success unconditionally, so ~450 blocks
+  // were reported published while the relay rejected every one of them for
+  // missing NIP-42 auth. A rejection now throws into the caller's retry loop.
+  await publish(signedEvent);
 
   console.log(`Published block ${blockHeight} (event ${id})`);
   return id;
