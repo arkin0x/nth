@@ -3,7 +3,7 @@
 // throwaway NTH_HOME. Nothing here talks to the network beyond 127.0.0.1.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -103,6 +103,10 @@ export async function startRelay({ requireAuth = false, policy = null, port = 0 
         const custom = relay.policy ? relay.policy(ev, relay) : null;
         if (custom) {
           if (custom === 'silence') return; // never answer
+          if (custom === 'store-silently') {
+            relay.stored.set(ev.id, ev); // keep it, but the OK is "lost"
+            return;
+          }
           const [ok, message] = custom;
           if (ok) relay.stored.set(ev.id, ev);
           ws.send(JSON.stringify(['OK', ev.id, ok, message]));
@@ -188,10 +192,23 @@ export async function startEsplora({ tip }) {
   return api;
 }
 
-/** A fresh runtime home. Never the real one. */
+// Temp homes this test process created, removed when it exits.
+const createdHomes = [];
+process.on('exit', () => {
+  for (const home of createdHomes) {
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  }
+});
+
+/** A fresh runtime home under the OS temp dir. Never the real one. */
 export function makeHome(prefix = 'nth-test-') {
   const home = mkdtempSync(join(tmpdir(), prefix));
   if (resolve(home).startsWith('/data/projects/nth')) throw new Error('refusing to use the real NTH_HOME');
+  createdHomes.push(home);
   return home;
 }
 

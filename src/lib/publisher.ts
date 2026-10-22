@@ -30,7 +30,10 @@ const AUTH_CHALLENGE_WAIT_MS = 5_000;
  * socket is down. An unbounded await therefore hangs the publisher forever
  * rather than erroring, which is exactly the silence this module exists to end.
  */
-const OK_TIMEOUT_MS = 15_000;
+const OK_TIMEOUT_MS = (() => {
+  const n = Number.parseInt((process.env.NTH_OK_TIMEOUT_MS || '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 15_000;
+})();
 
 /** NIP-01 machine-readable prefixes that mean "authenticate and try again". */
 const AUTH_REQUIRED = /^\s*(auth-required|restricted)\b/i;

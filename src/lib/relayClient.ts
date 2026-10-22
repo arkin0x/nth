@@ -76,6 +76,9 @@ export class RelayClient {
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
+      // Declared before anything can call settle(): a URL the ws library
+      // rejects synchronously must report its own error, not a TDZ error.
+      let timer: NodeJS.Timeout | undefined;
       const settle = (error?: Error) => {
         if (settled) return;
         settled = true;
@@ -93,7 +96,7 @@ export class RelayClient {
       }
       this.ws = ws;
 
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         settle(new Error(`timed out after ${this.opts.connectTimeoutMs}ms connecting`));
         ws.terminate();
       }, this.opts.connectTimeoutMs);

@@ -49,16 +49,34 @@ function sameRelay(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
+/** A relay URL a WebSocket can open: ws:// or wss:// with a host. */
+function isRelayUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Parse NTH_MIRROR_RELAYS: comma separated, trimmed, de-duplicated, and never
  * the primary (a mirror entry equal to the primary is dropped with a warning,
- * since it would only resend what the primary already took).
+ * since it would only resend what the primary already took). An entry that
+ * is not a ws:// or wss:// URL is dropped with a loud error at boot, rather
+ * than retried forever looking like a network fault.
  */
 export function parseMirrorRelays(raw: string | undefined, primary: string): string[] {
   const out: string[] = [];
   for (const part of (raw || '').split(',')) {
     const url = part.trim();
     if (!url) continue;
+    if (!isRelayUrl(url)) {
+      console.error(
+        `NTH_MIRROR_RELAYS entry "${url}" is not a ws:// or wss:// relay URL; ignoring it (no mirroring to it)`,
+      );
+      continue;
+    }
     if (sameRelay(url, primary)) {
       console.error(`NTH_MIRROR_RELAYS lists the primary relay ${url}; ignoring that entry`);
       continue;
@@ -217,6 +235,15 @@ export class Mirror {
       }
 
       const reason = reply.message || 'no reason given';
+
+      // NIP-01 says a duplicate comes with OK true, but a relay that answers
+      // false "duplicate:" still has the event: count it as taken.
+      if (DUPLICATE.test(reason)) {
+        console.log(`Mirror ${this.url}: block ${height} duplicate (event ${event.id}): ${reason}`);
+        this.queue.shift();
+        continue;
+      }
+
       if (RATE_LIMITED.test(reason)) {
         this.retryOrMiss(item, reason);
         if (this.queue[0] === item)

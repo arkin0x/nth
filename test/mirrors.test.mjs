@@ -155,3 +155,37 @@ test('a mirror that never answers OK and one that says duplicate: neither slows 
   assert.equal(misses(home).filter((m) => m.relay === dup.url).length, 0, 'a duplicate counts as taken');
   assert.equal(archive(home).length, 3);
 });
+
+test('a malformed mirror URL is dropped at boot with a clear error; the primary runs normally', async () => {
+  const esplora = await startEsplora({ tip: 101 });
+  const primary = await startRelay({ requireAuth: true });
+  const good = await startRelay({ policy: () => [false, 'duplicate: have it already'] });
+  const home = makeHome();
+  writeStateFile(home, 100);
+
+  const w = startWorker({
+    home,
+    relay: primary.url,
+    mirrors: ['onosendai.feeds.relay.tools', 'wss://', good.url],
+    esplora: esplora.url,
+    privateKey: generatePrivateKey(),
+  });
+  try {
+    await waitFor(() => stateNext(home) === 101, { what: 'primary to reach 101' });
+    await waitFor(() => /block 100 duplicate/.test(w.out), { what: 'false-duplicate counted as taken' });
+  } finally {
+    await w.stop();
+    await primary.close();
+    await good.close();
+    await esplora.close();
+  }
+
+  assert.match(
+    w.out,
+    /NTH_MIRROR_RELAYS entry "onosendai\.feeds\.relay\.tools" is not a ws:\/\/ or wss:\/\/ relay URL/,
+  );
+  assert.match(w.out, /NTH_MIRROR_RELAYS entry "wss:\/\/" is not a ws:\/\/ or wss:\/\/ relay URL/);
+  assert.match(w.out, new RegExp(`Mirror relays: ${good.url} \\(best effort\\)`));
+  assert.doesNotMatch(w.out, /before initialization/);
+  assert.equal(misses(home).length, 0, 'OK false "duplicate:" is not a miss');
+});

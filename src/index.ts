@@ -10,7 +10,7 @@ import { MirrorSet, parseMirrorRelays } from './lib/mirrors.js';
 import { connectPublisher } from './lib/publisher.js';
 import {
   acquireLock,
-  appendArchive,
+  appendArchiveOnce,
   appendMirrorMiss,
   clearPending,
   readPending,
@@ -243,7 +243,7 @@ async function main() {
         store: {
           read: () => readPending(role),
           write: (anchor) => writePending(role, anchor),
-          archive: (signed) => appendArchive(role, signed),
+          archive: (signed) => appendArchiveOnce(role, signed),
         },
       });
 

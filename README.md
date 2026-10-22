@@ -44,6 +44,7 @@ If no key is provided, a new key is generated and written to:
 - `NTH_NOT_MINED_DELAY_MS` (default: `300000`)
 - `NTH_ERROR_BACKOFF_BASE_MS` (default: `1000`)
 - `NTH_ERROR_BACKOFF_MAX_MS` (default: `300000`)
+- `NTH_OK_TIMEOUT_MS` (default: `15000`): how long to wait for the primary's OK before retrying (the retry resends the same event).
 - `NTH_BITCOIN_API_ERROR_LOG` (default: `.nth/bitcoin_api_errors.jsonl`)
 
 Example `.env`:

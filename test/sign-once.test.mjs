@@ -146,3 +146,36 @@ test('a pending anchor that no longer matches the chain is discarded and re-sign
   assert.equal(published[0].content, 'Block 100');
   assert.equal(primary.eventsReceived.filter((e) => e.content === 'Block 999').length, 0, 'tampered event never sent');
 });
+
+test('the primary stored the event but its OK was lost: the retry resends the same id and advances', async () => {
+  const esplora = await startEsplora({ tip: 102 });
+  let lost = 0;
+  const primary = await startRelay({
+    requireAuth: true,
+    policy: (ev) => (tagOf(ev, 'B') === '100' && lost++ === 0 ? 'store-silently' : null),
+  });
+  const home = makeHome();
+  writeStateFile(home, 100);
+
+  const w = startWorker({
+    home,
+    relay: primary.url,
+    esplora: esplora.url,
+    privateKey: generatePrivateKey(),
+    env: { NTH_OK_TIMEOUT_MS: '500' },
+  });
+  try {
+    await waitFor(() => stateNext(home) === 102, { what: 'state to reach 102' });
+  } finally {
+    await w.stop();
+    await primary.close();
+    await esplora.close();
+  }
+
+  const sent = idsForHeight(primary.eventsReceived, 100);
+  assert.equal(sent.length, 2, 'one lost OK, one resend');
+  assert.equal(new Set(sent).size, 1, 'the resend carried the same id');
+  assert.equal(idsForHeight([...primary.stored.values()], 100).length, 1, 'one anchor for height 100 on the primary');
+  assert.match(w.out, /timed out after 500ms waiting for OK/);
+  assert.equal(idsForHeight(archive(home), 100).length, 1);
+});

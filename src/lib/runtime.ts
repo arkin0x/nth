@@ -2,10 +2,12 @@ import {
   appendFileSync,
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -66,6 +68,19 @@ function writeFileAtomic(filePath: string, body: string): void {
     closeSync(fd);
   }
   renameSync(tmp, filePath);
+
+  // Make the rename itself durable: without a directory fsync, a power loss
+  // can forget a freshly renamed file (a lost pending anchor means a re-sign).
+  try {
+    const dirFd = openSync(dirname(filePath), 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Some filesystems refuse fsync on a directory; the file itself is synced.
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,6 +187,15 @@ export async function acquireLock(role: Role): Promise<void> {
   // Never let the lock socket keep the process alive on its own.
   server.unref();
   heldLockServer = server;
+
+  // Test hook: hold the gap between "exclusion decided" and "pidfile written",
+  // which is exactly the window the old check-then-write lock lost races in,
+  // so a test can start a rival inside it deterministically. Unset in production.
+  const holdMs = Number.parseInt((process.env.NTH_TEST_LOCK_HOLD_MS || '').trim(), 10);
+  if (Number.isFinite(holdMs) && holdMs > 0) {
+    console.log(`Instance lock taken; holding ${holdMs}ms before writing the pidfile (NTH_TEST_LOCK_HOLD_MS)`);
+    await new Promise((r) => setTimeout(r, holdMs));
+  }
 
   writeFileAtomic(lock, `${process.pid}\n`);
 
@@ -338,4 +362,31 @@ export function appendArchive(role: Role, event: Event): void {
   const { archive } = rolePaths(role);
   ensureDir(archive);
   appendFileSync(archive, `${JSON.stringify(event)}\n`, 'utf8');
+}
+
+/** How much of the archive's end to check for an event before appending it. */
+const ARCHIVE_TAIL_BYTES = 16 * 1024;
+
+/**
+ * Append unless the event is already one of the archive's last lines.
+ *
+ * The pending anchor's `archived` flag is written right after the append, so
+ * a hard kill between the two would otherwise archive the same event twice on
+ * restart. Only the tail needs checking: the event was appended last.
+ */
+export function appendArchiveOnce(role: Role, event: Event): void {
+  const { archive } = rolePaths(role);
+  if (existsSync(archive)) {
+    const fd = openSync(archive, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const length = Math.min(size, ARCHIVE_TAIL_BYTES);
+      const buf = Buffer.alloc(length);
+      readSync(fd, buf, 0, length, size - length);
+      if (buf.toString('utf8').includes(`"id":"${event.id}"`)) return;
+    } finally {
+      closeSync(fd);
+    }
+  }
+  appendArchive(role, event);
 }
