@@ -6,8 +6,20 @@ import { getPublicKey, SimplePool } from 'nostr-tools';
 import { createBitcoinApi, getBitcoinApiBaseUrlFromEnv } from './lib/bitcoin.js';
 import { loadOrCreatePrivateKey } from './lib/privateKey.js';
 import { DEFAULT_RELAY, findFrontierHeight } from './lib/nostr.js';
+import { MirrorSet, parseMirrorRelays } from './lib/mirrors.js';
 import { connectPublisher } from './lib/publisher.js';
-import { acquireLock, appendArchive, readState, writeState, NTH_HOME, type Role } from './lib/runtime.js';
+import {
+  acquireLock,
+  appendArchiveOnce,
+  appendMirrorMiss,
+  clearPending,
+  readPending,
+  readState,
+  writePending,
+  writeState,
+  NTH_HOME,
+  type Role,
+} from './lib/runtime.js';
 import { processBlock } from './processBlock.js';
 
 if (!global.WebSocket) {
@@ -51,14 +63,18 @@ function computeBackoffMs(attempt: number, opts: { baseMs: number; maxMs: number
  * If none of those produce an answer we abort rather than defaulting to zero.
  * Silently falling back to height 0 is precisely what caused the relay to
  * accumulate 3-8 duplicate copies of every early block.
+ *
+ * The probe asks the PRIMARY relay only, and takes a single URL so a mirror
+ * cannot be passed in by mistake: an empty or partial mirror must never be
+ * able to lower the resume point.
  */
 async function resolveStartHeight(opts: {
   role: Role;
   pool: SimplePool;
-  relays: string[];
+  primaryRelay: string;
   pubkey: string;
 }): Promise<number> {
-  const { role, pool, relays, pubkey } = opts;
+  const { role, pool, primaryRelay, pubkey } = opts;
 
   const override = parseStartHeightFromEnv();
   if (override !== null) {
@@ -72,8 +88,8 @@ async function resolveStartHeight(opts: {
     return persisted.nextHeight;
   }
 
-  console.log('No local state; probing relay for published frontier...');
-  const frontier = await findFrontierHeight({ pool, relays, pubkey });
+  console.log(`No local state; probing the primary relay ${primaryRelay} for the published frontier...`);
+  const frontier = await findFrontierHeight({ pool, relays: [primaryRelay], pubkey });
 
   if (frontier >= 0) {
     console.log(`Start height ${frontier + 1} (relay frontier ${frontier})`);
@@ -92,7 +108,7 @@ async function main() {
     throw new Error(`Invalid NTH_ROLE "${role}" (expected "tip" or "backfill")`);
   }
 
-  acquireLock(role);
+  await acquireLock(role);
 
   const keySource = loadOrCreatePrivateKey();
   const privateKey = keySource.key;
@@ -100,13 +116,15 @@ async function main() {
 
   const relay = (process.env.NTH_RELAY || DEFAULT_RELAY).trim() || DEFAULT_RELAY;
   const network = (process.env.NTH_NETWORK || 'mainnet').trim() || 'mainnet';
+  const mirrorUrls = parseMirrorRelays(process.env.NTH_MIRROR_RELAYS, relay);
 
   const bitcoinApi = createBitcoinApi(getBitcoinApiBaseUrlFromEnv());
   const pool = new SimplePool();
 
   console.log(`Role: ${role}`);
   console.log(`Runtime home: ${NTH_HOME}`);
-  console.log(`Using relay: ${relay}`);
+  console.log(`Using relay: ${relay} (primary: only its OK advances state)`);
+  console.log(`Mirror relays: ${mirrorUrls.length > 0 ? `${mirrorUrls.join(', ')} (best effort)` : 'none'}`);
   console.log(`Using bitcoin API: ${bitcoinApi.baseUrl}`);
   console.log(`Bitcoin network: ${network}`);
   console.log(`Publisher pubkey: ${pubkey}`);
@@ -138,7 +156,25 @@ async function main() {
   // probe must not be what opens it.
   const publisher = await connectPublisher({ pool, url: relay, privateKey });
 
-  const startHeight = await resolveStartHeight({ role, pool, relays: [relay], pubkey });
+  const startHeight = await resolveStartHeight({ role, pool, primaryRelay: relay, pubkey });
+
+  // Mirrors start only after the start height is settled, so they play no part
+  // in choosing it. They connect in their own sockets, never through `pool`.
+  const mirrors = new MirrorSet(mirrorUrls, privateKey, {
+    connectTimeoutMs: parseIntEnv('NTH_MIRROR_CONNECT_TIMEOUT_MS', 15_000),
+    okTimeoutMs: parseIntEnv('NTH_MIRROR_OK_TIMEOUT_MS', 15_000),
+    authWaitMs: parseIntEnv('NTH_MIRROR_AUTH_WAIT_MS', 5_000),
+    minIntervalMs: parseIntEnv('NTH_MIRROR_MIN_INTERVAL_MS', 1_000),
+    retryBaseMs: parseIntEnv('NTH_MIRROR_RETRY_BASE_MS', 5_000),
+    retryMaxMs: parseIntEnv('NTH_MIRROR_RETRY_MAX_MS', 300_000),
+    queueMax: parseIntEnv('NTH_MIRROR_QUEUE_MAX', 10_000),
+    maxAttempts: Math.max(1, parseIntEnv('NTH_MIRROR_MAX_ATTEMPTS', 5)),
+    onMiss: (miss) => appendMirrorMiss(role, miss),
+  });
+  // Heights still queued when the process ends are recorded as missed, so the
+  // missed file stays a complete list for catch-up (a SIGKILL is the exception).
+  process.on('exit', () => mirrors.stop('process exited before the mirror took it'));
+  mirrors.start();
 
   console.log(`Publish delay: ${publishDelayMs}ms`);
   console.log(`Confirmation depth: ${confirmations}`);
@@ -196,7 +232,7 @@ async function main() {
         continue;
       }
 
-      await processBlock({
+      const event = await processBlock({
         blockHeight,
         blockHash: currentHash,
         nextBlockHash: nextHash,
@@ -204,13 +240,29 @@ async function main() {
         publish: publisher.publish,
         privateKey,
         network,
-        onSigned: (event) => appendArchive(role, event),
+        store: {
+          read: () => readPending(role),
+          write: (anchor) => writePending(role, anchor),
+          archive: (signed) => appendArchiveOnce(role, signed),
+        },
       });
 
-      // Advance the durable resume point only after the relay accepted the
+      // Advance the durable resume point only after the PRIMARY accepted the
       // event. processBlock throws on rejection, so a refused block is retried
-      // here rather than skipped over.
+      // here, with the same signed event, rather than skipped over.
       writeState(role, blockHeight + 1);
+
+      // Only now is the pending anchor done with. Stopping between these two
+      // lines is harmless: the next start resumes at blockHeight + 1 and the
+      // leftover pending anchor (for blockHeight) is simply not reused.
+      try {
+        clearPending(role);
+      } catch (error) {
+        console.error(`Could not clear the pending anchor for block ${blockHeight} (harmless; it is not reused):`, error);
+      }
+
+      // Best effort, in the background; never waits, never throws.
+      mirrors.enqueue(blockHeight, event);
 
       consecutiveErrors = 0;
 

@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc",
     "run": "node ./dist/index.js",
-    "start": "npm run build && npm run run"
+    "start": "npm run build && npm run run",
+    "test": "npm run build && node --test --test-concurrency=1 'test/*.test.mjs'"
   }
 }
