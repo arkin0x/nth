@@ -156,13 +156,16 @@ test('the primary stored the event but its OK was lost: the retry resends the sa
   });
   const home = makeHome();
   writeStateFile(home, 100);
+  // Set through .env in the worker's cwd (the temp home), as production does.
+  const { writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  writeFileSync(join(home, '.env'), 'NTH_OK_TIMEOUT_MS=500\n');
 
   const w = startWorker({
     home,
     relay: primary.url,
     esplora: esplora.url,
     privateKey: generatePrivateKey(),
-    env: { NTH_OK_TIMEOUT_MS: '500' },
   });
   try {
     await waitFor(() => stateNext(home) === 102, { what: 'state to reach 102' });

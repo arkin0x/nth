@@ -30,10 +30,17 @@ const AUTH_CHALLENGE_WAIT_MS = 5_000;
  * socket is down. An unbounded await therefore hangs the publisher forever
  * rather than erroring, which is exactly the silence this module exists to end.
  */
-const OK_TIMEOUT_MS = (() => {
+const DEFAULT_OK_TIMEOUT_MS = 15_000;
+
+/**
+ * NTH_OK_TIMEOUT_MS, read when connecting rather than at import: ESM evaluates
+ * this module before index.ts runs dotenv.config(), so an import-time read
+ * would silently ignore a value set in .env.
+ */
+function okTimeoutFromEnv(): number {
   const n = Number.parseInt((process.env.NTH_OK_TIMEOUT_MS || '').trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : 15_000;
-})();
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OK_TIMEOUT_MS;
+}
 
 /** NIP-01 machine-readable prefixes that mean "authenticate and try again". */
 const AUTH_REQUIRED = /^\s*(auth-required|restricted)\b/i;
@@ -99,6 +106,7 @@ export async function connectPublisher(opts: {
   privateKey: string;
 }): Promise<Publisher> {
   const { pool, url, privateKey } = opts;
+  const OK_TIMEOUT_MS = okTimeoutFromEnv();
 
   // The key signs the kind 22242 auth event here and nowhere else. It is never
   // logged, never put in an error message and never sent anywhere but as a

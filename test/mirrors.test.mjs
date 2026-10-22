@@ -166,7 +166,7 @@ test('a malformed mirror URL is dropped at boot with a clear error; the primary 
   const w = startWorker({
     home,
     relay: primary.url,
-    mirrors: ['onosendai.feeds.relay.tools', 'wss://', good.url],
+    mirrors: ['onosendai.feeds.relay.tools', 'wss://', 'ws://127.0.0.1:1/#frag', good.url],
     esplora: esplora.url,
     privateKey: generatePrivateKey(),
   });
@@ -186,6 +186,21 @@ test('a malformed mirror URL is dropped at boot with a clear error; the primary 
   );
   assert.match(w.out, /NTH_MIRROR_RELAYS entry "wss:\/\/" is not a ws:\/\/ or wss:\/\/ relay URL/);
   assert.match(w.out, new RegExp(`Mirror relays: ${good.url} \\(best effort\\)`));
-  assert.doesNotMatch(w.out, /before initialization/);
+  assert.match(w.out, /NTH_MIRROR_RELAYS entry "ws:\/\/127\.0\.0\.1:1\/#frag" is not a ws:\/\/ or wss:\/\/ relay URL/);
   assert.equal(misses(home).length, 0, 'OK false "duplicate:" is not a miss');
+});
+
+test('RelayClient reports a URL the ws library rejects synchronously as that error', async () => {
+  const { RelayClient } = await import('../dist/lib/relayClient.js');
+  const client = new RelayClient('ws://127.0.0.1:1/#frag', generatePrivateKey(), {
+    connectTimeoutMs: 500,
+    okTimeoutMs: 500,
+    authWaitMs: 100,
+  });
+  await assert.rejects(client.connect(), (error) => {
+    assert.doesNotMatch(error.message, /before initialization/);
+    assert.match(error.message, /cannot open ws:\/\/127\.0\.0\.1:1\/#frag: .*fragment/i);
+    return true;
+  });
+  client.close();
 });

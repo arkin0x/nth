@@ -53,7 +53,8 @@ function sameRelay(a: string, b: string): boolean {
 function isRelayUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') && parsed.hostname.length > 0;
+    // ws refuses a URL with a fragment on every connect, so reject it here.
+    return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') && parsed.hostname.length > 0 && !parsed.hash;
   } catch {
     return false;
   }
