@@ -245,7 +245,7 @@ class ProofOfWorkTests(unittest.TestCase):
         h = 1_200
         forged = dict(SUMMARIES[h])
         prev = bytes.fromhex(SUMMARIES[h]["previousblockhash"])[::-1]
-        for nonce in range(forged["nonce"] + 1, forged["nonce"] + 1 << 20):
+        for nonce in range(forged["nonce"] + 1, forged["nonce"] + (1 << 20)):
             forged["nonce"] = nonce
             rec = HH.record_from_summary(forged)
             if int.from_bytes(HH.sha256d(rec[:4] + prev + rec[4:]), "little") > HH.decode_compact(forged["bits"]):
