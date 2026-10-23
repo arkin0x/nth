@@ -82,3 +82,4 @@ client/
 
 # PocketBase local data (do not commit)
 bin/pb_data/
+__pycache__/
