@@ -7,8 +7,9 @@ name: Weekly headers-v1 head blob
 # It never merges, never pushes to headers-v1 or master, and never deploys.
 # The blobs and their checkpoints are trust anchors for every client that
 # reads the line (ONOSENDAI, cyberspace-mcp, HOSAKA), so a person reviews and
-# merges each one. The only ref this job writes is a NEW branch named
-# auto/headers-head-<height>.
+# merges each one. The only ref this job writes is a branch named
+# auto/headers-head-<height>, created new (or left as it is when a rerun finds
+# it already holding exactly this proposal).
 #
 # If GitHub Actions may not open pull requests in this repository (Settings >
 # Actions > General > Workflow permissions), the branch is still pushed and an
@@ -21,7 +22,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write # push the new proposal branch only (see the guard below)
+  contents: write # push the proposal branch only (see the guards below)
   pull-requests: write # open the proposal
   issues: write # the reminder or failure issue
 
@@ -29,14 +30,14 @@ concurrency:
   group: headers-head
   cancel-in-progress: false
 
+env:
+  GH_REPO: ${{ github.repository }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
 jobs:
   propose:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Check out the tool (master)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -49,33 +50,49 @@ jobs:
         with:
           ref: headers-v1
           path: line
+          persist-credentials: false
 
       - name: Is a proposal already waiting?
         id: waiting
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          pr=$(gh pr list --base headers-v1 --state open --json number,headRefName \
-            --jq '[.[] | select(.headRefName | startswith("auto/headers-head-"))][0].number // empty')
-          # A proposal that could only be filed as an issue (no pull request
-          # permission) waits the same way.
-          issue=$(gh issue list --state open --search 'in:title "headers-v1: head blob to checkpoint"' --json number,title \
-            --jq '[.[] | select(.title | startswith("headers-v1: head blob to checkpoint"))][0].number // empty')
+          # Any open pull request into headers-v1 is a proposal waiting for review.
+          pr=$(gh pr list --base headers-v1 --state open --json number --jq '.[0].number // empty')
           if [ -n "$pr" ]; then
-            gh pr comment "$pr" --body "Weekly reminder: this head-blob proposal is still open. Review and merge it (or close it) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
-          elif [ -n "$issue" ]; then
-            gh issue comment "$issue" --body "Weekly reminder: this head-blob proposal is still waiting. Open and merge its pull request (or close this issue) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
-            pr="issue-$issue"
+            gh pr comment "$pr" --body "Weekly reminder: a pull request into headers-v1 is still open. Review and merge it (or close it) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          # A proposal filed as an issue (no pull request permission) waits the
+          # same way, until the line reaches its height.
+          top=$(python3 -I -c 'import json; print(int(json.load(open("line/manifest.json"))["generatedAtHeight"]))')
+          gh issue list --state open --search 'in:title "headers-v1: head blob to checkpoint"' --json number,title \
+            --jq '.[] | select(.title | test("^headers-v1: head blob to checkpoint [0-9]+: open the pull request$")) | "\(.number) \(.title)"' > "$RUNNER_TEMP/issues.txt"
+          skip=false
+          while read -r number rest; do
+            height=$(printf '%s\n' "$rest" | sed -E 's/^headers-v1: head blob to checkpoint ([0-9]+):.*/\1/')
+            if [ "$top" -ge "$height" ]; then
+              gh issue close "$number" --comment "headers-v1 now reaches block $top, at or past $height, so this proposal has landed. Closed by the weekly job. Run: $RUN_URL"
+            else
+              gh issue comment "$number" --body "Weekly reminder: this head-blob proposal is still waiting. Open and merge its pull request (or close this issue) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+              skip=true
+            fi
+          done < "$RUNNER_TEMP/issues.txt"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
       - name: Test the tool
-        if: steps.waiting.outputs.pr == ''
+        if: steps.waiting.outputs.skip != 'true'
+        timeout-minutes: 10
         env:
           HEADERS_DIR: ${{ github.workspace }}/line
         run: python3 -I -m unittest discover -s tool/test -p 'test_*.py'
 
       - name: Derive, verify and cross-check
         id: derive
-        if: steps.waiting.outputs.pr == ''
+        if: steps.waiting.outputs.skip != 'true'
+        # Its own limit, below the job's, so a hang fails this step and the
+        # failure issue below still runs.
+        timeout-minutes: 40
         run: |
           set +e
           python3 -I tool/scripts/headers_head.py --headers-dir line \
@@ -93,46 +110,67 @@ jobs:
         if: steps.derive.outputs.code == '0'
         working-directory: line
         env:
+          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.derive.outputs.branch }}
           HEIGHT: ${{ steps.derive.outputs.height }}
         run: |
           case "$BRANCH" in auto/headers-head-[0-9]*) ;; *) echo "refusing to push $BRANCH"; exit 1 ;; esac
-          # Only the manifest and blob files may change.
-          unexpected=$(git status --porcelain | awk '{print $2}' | grep -v -E '^(manifest\.json|headers-[0-9]{3}\.bin)$' || true)
-          if [ -n "$unexpected" ]; then echo "unexpected changes: $unexpected"; exit 1; fi
-          # A new branch only: never move a ref that already exists.
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
-            echo "$BRANCH already exists on the remote"; exit 1
-          fi
+          # Only the manifest and blob files may change, nothing may be deleted,
+          # and the only existing blob that may change is the previous head,
+          # whose old bytes must stay a prefix of the new file.
+          bad=$(git status --porcelain | grep -v -E '^( M manifest\.json| M headers-[0-9]{3}\.bin|\?\? headers-[0-9]{3}\.bin)$' || true)
+          if [ -n "$bad" ]; then echo "unexpected changes: $bad"; exit 1; fi
+          old_head=$(git show HEAD:manifest.json | python3 -I -c 'import json,sys; m=json.load(sys.stdin); b=m["blobs"][-1]; print(b["file"] if b["count"] < m["blobSize"] else "")')
+          for f in $(git diff --name-only -- 'headers-*.bin'); do
+            if [ "$f" != "$old_head" ]; then echo "$f is a finalized blob and must never change"; exit 1; fi
+            size=$(git cat-file -s "HEAD:$f")
+            git show "HEAD:$f" > "$RUNNER_TEMP/old-head.bin"
+            cmp -n "$size" "$RUNNER_TEMP/old-head.bin" "$f" || { echo "$f is not an append to the old head"; exit 1; }
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
+          git switch -q -c "$BRANCH"
           git add manifest.json headers-*.bin
           git commit -q -m "headers-v1: head blob to checkpoint $HEIGHT" -m "Proposed by .github/workflows/headers-head.yml ($RUN_URL); never merged by it."
-          git push origin "HEAD:refs/heads/$BRANCH"
+          auth=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
+          if git "${auth[@]}" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            # Never move an existing ref. A rerun whose branch already holds
+            # exactly this proposal goes on to open it; anything else stops.
+            git "${auth[@]}" fetch -q origin "refs/heads/$BRANCH"
+            if [ "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+              echo "$BRANCH already holds this proposal"; exit 0
+            fi
+            echo "$BRANCH already exists on the remote with other content"; exit 1
+          fi
+          git "${auth[@]}" push origin "HEAD:refs/heads/$BRANCH"
 
       - name: Open the pull request, or the reminder issue
         if: steps.derive.outputs.code == '0'
+        working-directory: line
         env:
+          GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.derive.outputs.branch }}
           HEIGHT: ${{ steps.derive.outputs.height }}
+          COMPARE: ${{ github.server_url }}/${{ github.repository }}/compare/headers-v1...
         run: |
           title="headers-v1: head blob to checkpoint $HEIGHT"
           { cat "$RUNNER_TEMP/summary.md"; printf '\nRun: %s\n' "$RUN_URL"; } > "$RUNNER_TEMP/pr.md"
-          if gh pr create --base headers-v1 --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pr.md"; then
+          if gh pr create --base headers-v1 --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pr.md" 2> "$RUNNER_TEMP/pr.err"; then
             exit 0
           fi
-          compare="${{ github.server_url }}/${{ github.repository }}/compare/headers-v1...$BRANCH?expand=1"
-          { printf 'The weekly job verified and pushed `%s` but could not open the pull request (GitHub Actions may not create pull requests in this repository: Settings > Actions > General > Workflow permissions).\n\nOpen it here: %s\n\n---\n\n' "$BRANCH" "$compare"; cat "$RUNNER_TEMP/pr.md"; } > "$RUNNER_TEMP/issue.md"
-          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq "[.[] | select(.title == \"$title: open the pull request\")][0].number // empty")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body-file "$RUNNER_TEMP/issue.md"
-          else
-            gh issue create --title "$title: open the pull request" --body-file "$RUNNER_TEMP/issue.md"
-          fi
+          cat "$RUNNER_TEMP/pr.err"
+          {
+            printf 'The weekly job verified and pushed `%s` but could not open the pull request. GitHub said:\n\n```\n' "$BRANCH"
+            cat "$RUNNER_TEMP/pr.err"
+            printf '```\n\nIf Actions may not create pull requests here (Settings > Actions > General > Workflow permissions), open it here: %s%s?expand=1\n\nThe next run closes this issue once headers-v1 reaches %s.\n\n---\n\n' "$COMPARE" "$BRANCH" "$HEIGHT"
+            cat "$RUNNER_TEMP/pr.md"
+          } > "$RUNNER_TEMP/issue.md"
+          gh issue create --title "$title: open the pull request" --body-file "$RUNNER_TEMP/issue.md"
 
       - name: Report a failure as an issue
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           title="Weekly headers-v1 head blob job failed"
           {

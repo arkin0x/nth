@@ -15,7 +15,8 @@ Nothing is believed because a server said it. The tool:
      header from its 48-byte record and the previous hash, and checks the
      header-chain consensus rules: linkage, proof of work against the bits,
      bits equal to the exact retarget result at every 2016th block and
-     unchanged elsewhere, and time above the median of the previous eleven;
+     unchanged elsewhere, time above the median of the previous eleven, and
+     the BIP34/66/65 minimum versions;
      every height in PINNED (the 19 checkpoints ONOSENDAI, cyberspace-mcp and
      hosaka-core embed) and every manifest checkpoint must match;
   2. fetches only the new headers from one Esplora source and puts each
@@ -126,6 +127,9 @@ class Net:
     """The consensus parameters the walk needs. Tests use REGTEST's easy limit
     to mine synthetic chains; everything published uses MAINNET."""
     pow_limit_bits: int
+    #: Heights from which a header's version must be at least 2, 3 and 4
+    #: (BIP34, BIP66, BIP65; ContextualCheckBlockHeader's bad-version rule).
+    version_heights: Tuple[int, int, int] = (227_931, 363_725, 388_381)
 
     @property
     def pow_limit(self) -> int:
@@ -133,7 +137,7 @@ class Net:
 
 
 MAINNET = Net(POW_LIMIT_BITS)
-REGTEST = Net(0x207FFFFF)
+REGTEST = Net(0x207FFFFF, (1, 1, 1))
 
 
 def next_bits(last_bits: int, first_time: int, last_time: int, net: Net = MAINNET) -> int:
@@ -165,6 +169,10 @@ class Chain:
         if len(rec) != RECORD_SIZE:
             raise ChainError(f"a record is {RECORD_SIZE} bytes, not {len(rec)}")
         h = self.height + 1
+        version = struct.unpack_from("<i", rec, 0)[0]  # signed, as nVersion is
+        for minimum, since in zip((2, 3, 4), self.net.version_heights):
+            if h >= since and version < minimum:
+                raise ChainError(f"version {version} at height {h}, at least {minimum} required since {since}")
         t, bits = struct.unpack_from("<II", rec, 36)
         if h == 0:
             expected_bits = self.net.pow_limit_bits
@@ -471,7 +479,7 @@ New checkpoint: `{cp['height']}` = `{cp['blockHash']}`
 
 ### What was checked (scripts/headers_head.py on master)
 
-- The whole published line was re-verified from genesis before anything was added: linkage, proof of work, bits equal to the exact retarget result at every 2016th block and unchanged elsewhere, time above the median of the previous 11, every manifest checkpoint, and the 19 checkpoints ONOSENDAI, cyberspace-mcp and hosaka-core embed.
+- The whole published line was re-verified from genesis before anything was added: linkage, proof of work, bits equal to the exact retarget result at every 2016th block and unchanged elsewhere, time above the median of the previous 11, the BIP34/66/65 minimum versions, every manifest checkpoint, and the 19 checkpoints ONOSENDAI, cyberspace-mcp and hosaka-core embed.
 - {s['recordsAdded']:,} new headers came from {s['source']} and passed the same rules; each one's rebuilt hash equals the source's id, and its previousblockhash equals the line's.
 - Tips: {tips}. The checkpoint is {s['depth']:,} blocks deep ({s['minDepth']} required).
 - Every checkpoint height added was cross-checked against two other sources:
@@ -512,10 +520,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if any(c.base == a.source.rstrip("/") for c in checks):
             raise ChainError("a cross-check source must not be the source")
         s = extend(a.headers_dir, Esplora(a.source, get), checks, a.target, min_depth=a.min_depth)
-    except ChainError as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001  any failure must reach the issue with its reason
+        print(f"FAILED: {exc.__class__.__name__}: {exc}", file=sys.stderr)
         if a.summary_md:
-            a.summary_md.write_text(f"The weekly head-blob job failed and published nothing.\n\n```\n{exc}\n```\n")
+            a.summary_md.write_text(f"The weekly head-blob job failed and published nothing.\n\n```\n{exc.__class__.__name__}: {exc}\n```\n")
         return 1
     if s is None:
         return 10

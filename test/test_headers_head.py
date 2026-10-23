@@ -217,6 +217,63 @@ class ExtendTests(unittest.TestCase):
             self.extend(*self.sources())
 
 
+class ProofOfWorkTests(unittest.TestCase):
+    """The rules a lying source cannot talk its way past, each on its own."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.pinned = {0: HASHES[0]}
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_a_hash_above_the_target_fails_proof_of_work(self):
+        strict = HH.Net(0x1F00FFFF, (1, 1, 1))  # about 1 in 256 of the easy chain's hashes pass
+        chain = HH.Chain({}, strict)
+        rec = struct.pack("<I", 0x20000000) + bytes(32) + struct.pack("<III", T0, 0x1F00FFFF, 0)
+        nonce = 0
+        while int.from_bytes(HH.sha256d(rec[:4] + bytes(32) + rec[4:]), "little") <= HH.decode_compact(0x1F00FFFF):
+            nonce += 1
+            rec = rec[:44] + struct.pack("<I", nonce)
+        with self.assertRaisesRegex(HH.ChainError, "proof of work failed at height 0"):
+            chain.push(rec)
+
+    def test_a_forged_nonce_whose_id_the_source_also_forged(self):
+        """The source reports the forged header's own hash as its id, so only
+        proof of work (or the linkage after it) can catch it."""
+        write_dir(self.dir, 998)
+        h = 1_200
+        forged = dict(SUMMARIES[h])
+        prev = bytes.fromhex(SUMMARIES[h]["previousblockhash"])[::-1]
+        for nonce in range(forged["nonce"] + 1, forged["nonce"] + 1 << 20):
+            forged["nonce"] = nonce
+            rec = HH.record_from_summary(forged)
+            if int.from_bytes(HH.sha256d(rec[:4] + prev + rec[4:]), "little") > HH.decode_compact(forged["bits"]):
+                break
+        forged["id"] = HH.sha256d(rec[:4] + prev + rec[4:])[::-1].hex()
+        src = Lying("src", 3_200, SUMMARIES, {h: forged})
+        with self.assertRaisesRegex(HH.ChainError, "proof of work failed at height 1200"):
+            HH.extend(self.dir, src, [FakeEsplora("a", 3_200, SUMMARIES), FakeEsplora("b", 3_200, SUMMARIES)],
+                      log=lambda m: None, now=NOW, pinned=self.pinned, net=HH.REGTEST)
+
+    def test_a_manifest_checkpoint_the_line_does_not_reach(self):
+        """Blob bytes and their sha256 agree, but the manifest's checkpoint is
+        another hash: only the walk's own checkpoint comparison catches it."""
+        write_dir(self.dir, 998)
+        m = json.loads((self.dir / "manifest.json").read_text())
+        m["checkpoints"][0]["blockHash"] = "00" * 32
+        (self.dir / "manifest.json").write_text(json.dumps(m))
+        with self.assertRaisesRegex(HH.ChainError, "ends at"):
+            HH.verify_dir(self.dir, self.pinned, HH.REGTEST)
+
+    def test_a_low_version_after_its_activation_height(self):
+        chain = HH.Chain({}, HH.Net(HH.REGTEST.pow_limit_bits, (1, 1, 1)))
+        rec = struct.pack("<i", 1) + bytes(32) + struct.pack("<III", T0, HH.REGTEST.pow_limit_bits, 0)
+        chain.push(RECORDS[0])
+        with self.assertRaisesRegex(HH.ChainError, "version 1 at height 1, at least 2"):
+            chain.push(rec)
+
+
 class ConsensusTests(unittest.TestCase):
     def test_checkpoint_height(self):
         self.assertEqual(HH.checkpoint_height(972_815), 971_999)
