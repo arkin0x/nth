@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "network": "mainnet",
   "blobSize": 50000,
-  "generatedAtHeight": 971999,
+  "generatedAtHeight": 972999,
   "blobs": [
     {
       "ordinal": 0,
@@ -140,8 +140,8 @@
     {
       "ordinal": 19,
       "startHeight": 950000,
-      "count": 22000,
-      "sha256": "830fed9b23004cd5efe4aba4d24a0eb9c48adc1c89b40016c849f881b7159781",
+      "count": 23000,
+      "sha256": "475e92874a56e19a53eb9dc3da9bbf1174c9a1057387f82cd1c7a225e89c02a6",
       "file": "headers-019.bin"
     }
   ],
@@ -223,8 +223,8 @@
       "blockHash": "00000000000000000000df842728edc58cf64288ca21433257700f3d5b45f286"
     },
     {
-      "height": 971999,
-      "blockHash": "00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82"
+      "height": 972999,
+      "blockHash": "0000000000000000000006388a5bd5b01cdd948c24d6a8ed171a6c45f1bbdfb1"
     }
   ]
 }
