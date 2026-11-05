@@ -1,29 +1,40 @@
-name: Weekly headers-v1 head blob
+name: Headers-v1 head blob
 
 # Grows the headers-v1 head blob to the newest checkpoint height (a height
 # h with h % 1000 == 999, at least 100 blocks deep) with
-# scripts/headers_head.py, and PROPOSES it as a pull request into headers-v1.
+# scripts/headers_head.py, then either PROPOSES it or PUBLISHES it.
 #
-# It never merges, never pushes to headers-v1 or master, and never deploys.
-# The blobs and their checkpoints are trust anchors for every client that
-# reads the line (ONOSENDAI, cyberspace-mcp, HOSAKA), so a person reviews and
-# merges each one. The only ref this job writes is a branch named
-# auto/headers-head-<height>, created new (or left as it is when a rerun finds
-# it already holding exactly this proposal).
+# The mode is the repository variable HEADERS_PUBLISH (Settings > Secrets and
+# variables > Actions > Variables):
 #
-# If GitHub Actions may not open pull requests in this repository (Settings >
-# Actions > General > Workflow permissions), the branch is still pushed and an
-# issue links the one click that opens the pull request. If anything fails,
-# an issue says what. Either issue is the weekly reminder.
+#   unset, or anything but "auto"   propose (as before): push a new branch
+#                                   auto/headers-head-<height> and open a pull
+#                                   request into headers-v1 (or, when Actions
+#                                   may not open pull requests here, an issue
+#                                   with the one click that does). A person
+#                                   merges. Reminders go out on Mondays only.
+#   "auto"                          publish: fast-forward headers-v1 itself,
+#                                   then close every proposal it supersedes.
+#
+# Either way the blobs pass the same checks first: the whole published line
+# re-verified from genesis, the new headers through the same consensus rules,
+# every new checkpoint cross-checked against two other sources, the head
+# grown append-only, and the written directory verified again from genesis.
+# scripts/headers_publish.sh does every push and holds every git guard: only
+# manifest.json and blob files change, finalized blobs never do, no force
+# push, and publish only on top of the headers-v1 it verified on.
+#
+# It never pushes to master and never deploys anything. The NTH publisher
+# (kind 321 anchors on the relays) is a different program and is not touched.
 
 on:
   schedule:
-    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+    - cron: "23 6 * * *" # daily 06:23 UTC: a checkpoint is published (or proposed) within a day of being 100 blocks deep
   workflow_dispatch: {}
 
 permissions:
-  contents: write # push the proposal branch only (see the guards below)
-  pull-requests: write # open the proposal
+  contents: write # push the proposal branch, or fast-forward headers-v1 in auto mode (see headers_publish.sh)
+  pull-requests: write # open the proposal, close superseded ones
   issues: write # the reminder or failure issue
 
 concurrency:
@@ -33,6 +44,7 @@ concurrency:
 env:
   GH_REPO: ${{ github.repository }}
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  MODE: ${{ vars.HEADERS_PUBLISH == 'auto' && 'auto' || 'propose' }}
 
 jobs:
   propose:
@@ -56,11 +68,22 @@ jobs:
         id: waiting
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
         run: |
+          echo "mode: $MODE"
+          # A reminder only on Mondays (or a manual run), so a daily schedule
+          # reminds weekly.
+          remind=false
+          if [ "$EVENT" != schedule ] || [ "$(date -u +%u)" = 1 ]; then remind=true; fi
+          # In auto mode nothing waits: a proposal still open is superseded
+          # by this run's publish, which closes it.
+          if [ "$MODE" = auto ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           # Any open pull request into headers-v1 is a proposal waiting for review.
           pr=$(gh pr list --base headers-v1 --state open --json number --jq '.[0].number // empty')
           if [ -n "$pr" ]; then
-            gh pr comment "$pr" --body "Weekly reminder: a pull request into headers-v1 is still open. Review and merge it (or close it) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+            if [ "$remind" = true ]; then
+              gh pr comment "$pr" --body "Weekly reminder: a pull request into headers-v1 is still open. Review and merge it (or close it) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+            fi
             echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           # A proposal filed as an issue (no pull request permission) waits the
@@ -72,16 +95,18 @@ jobs:
           while read -r number rest; do
             height=$(printf '%s\n' "$rest" | sed -E 's/^headers-v1: head blob to checkpoint ([0-9]+):.*/\1/')
             if [ "$top" -ge "$height" ]; then
-              gh issue close "$number" --comment "headers-v1 now reaches block $top, at or past $height, so this proposal has landed. Closed by the weekly job. Run: $RUN_URL"
+              gh issue close "$number" --comment "headers-v1 now reaches block $top, at or past $height, so this proposal has landed. Closed by the job. Run: $RUN_URL"
             else
-              gh issue comment "$number" --body "Weekly reminder: this head-blob proposal is still waiting. Open and merge its pull request (or close this issue) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+              if [ "$remind" = true ]; then
+                gh issue comment "$number" --body "Weekly reminder: this head-blob proposal is still waiting. Open and merge its pull request (or close this issue) and the next run proposes the newest checkpoint height. Run: $RUN_URL"
+              fi
               skip=true
             fi
           done < "$RUNNER_TEMP/issues.txt"
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
       - name: Test the tool
-        if: steps.waiting.outputs.skip != 'true'
+        if: steps.waiting.outputs.skip == 'false'
         timeout-minutes: 10
         env:
           HEADERS_DIR: ${{ github.workspace }}/line
@@ -89,7 +114,7 @@ jobs:
 
       - name: Derive, verify and cross-check
         id: derive
-        if: steps.waiting.outputs.skip != 'true'
+        if: steps.waiting.outputs.skip == 'false'
         # Its own limit, below the job's, so a hang fails this step and the
         # failure issue below still runs.
         timeout-minutes: 40
@@ -99,53 +124,29 @@ jobs:
             --summary-json "$RUNNER_TEMP/summary.json" --summary-md "$RUNNER_TEMP/summary.md"
           code=$?
           set -e
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          if [ "$code" = 10 ]; then echo "The head is already at the newest checkpoint height."; exit 0; fi
+          if [ "$code" = 10 ]; then echo "The head is already at the newest checkpoint height."; echo "extended=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           [ "$code" = 0 ]
           height=$(python3 -I -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["checkpoint"]["height"]))' "$RUNNER_TEMP/summary.json")
-          echo "height=$height" >> "$GITHUB_OUTPUT"
-          echo "branch=auto/headers-head-$height" >> "$GITHUB_OUTPUT"
+          # extended is a word, not a number: a skipped step's outputs are
+          # null, and GitHub compares null with '0' as 0 == 0, which once ran
+          # the push step after a skipped derive (run 41401521166). Null never
+          # equals 'true'.
+          {
+            echo "height=$height"
+            echo "branch=auto/headers-head-$height"
+            echo "extended=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Push the proposal branch
-        if: steps.derive.outputs.code == '0'
+        if: steps.derive.outputs.extended == 'true' && env.MODE != 'auto'
         working-directory: line
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.derive.outputs.branch }}
           HEIGHT: ${{ steps.derive.outputs.height }}
-        run: |
-          case "$BRANCH" in auto/headers-head-[0-9]*) ;; *) echo "refusing to push $BRANCH"; exit 1 ;; esac
-          # Only the manifest and blob files may change, nothing may be deleted,
-          # and the only existing blob that may change is the previous head,
-          # whose old bytes must stay a prefix of the new file.
-          bad=$(git status --porcelain | grep -v -E '^( M manifest\.json| M headers-[0-9]{3}\.bin|\?\? headers-[0-9]{3}\.bin)$' || true)
-          if [ -n "$bad" ]; then echo "unexpected changes: $bad"; exit 1; fi
-          old_head=$(git show HEAD:manifest.json | python3 -I -c 'import json,sys; m=json.load(sys.stdin); b=m["blobs"][-1]; print(b["file"] if b["count"] < m["blobSize"] else "")')
-          for f in $(git diff --name-only -- 'headers-*.bin'); do
-            if [ "$f" != "$old_head" ]; then echo "$f is a finalized blob and must never change"; exit 1; fi
-            size=$(git cat-file -s "HEAD:$f")
-            git show "HEAD:$f" > "$RUNNER_TEMP/old-head.bin"
-            cmp -n "$size" "$RUNNER_TEMP/old-head.bin" "$f" || { echo "$f is not an append to the old head"; exit 1; }
-          done
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -q -c "$BRANCH"
-          git add manifest.json headers-*.bin
-          git commit -q -m "headers-v1: head blob to checkpoint $HEIGHT" -m "Proposed by .github/workflows/headers-head.yml ($RUN_URL); never merged by it."
-          auth=(-c credential.helper= -c 'credential.helper=!gh auth git-credential')
-          if git "${auth[@]}" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
-            # Never move an existing ref. A rerun whose branch already holds
-            # exactly this proposal goes on to open it; anything else stops.
-            git "${auth[@]}" fetch -q origin "refs/heads/$BRANCH"
-            if [ "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$(git rev-parse 'HEAD^{tree}')" ]; then
-              echo "$BRANCH already holds this proposal"; exit 0
-            fi
-            echo "$BRANCH already exists on the remote with other content"; exit 1
-          fi
-          git "${auth[@]}" push origin "HEAD:refs/heads/$BRANCH"
+        run: bash ../tool/scripts/headers_publish.sh propose "$HEIGHT"
 
       - name: Open the pull request, or the reminder issue
-        if: steps.derive.outputs.code == '0'
+        if: steps.derive.outputs.extended == 'true' && env.MODE != 'auto'
         working-directory: line
         env:
           GH_TOKEN: ${{ github.token }}
@@ -160,26 +161,85 @@ jobs:
           fi
           cat "$RUNNER_TEMP/pr.err"
           {
-            printf 'The weekly job verified and pushed `%s` but could not open the pull request. GitHub said:\n\n```\n' "$BRANCH"
+            # The backticks are Markdown for the issue, not command substitution.
+            # shellcheck disable=SC2016
+            printf 'The job verified and pushed `%s` but could not open the pull request. GitHub said:\n\n```\n' "$BRANCH"
             cat "$RUNNER_TEMP/pr.err"
             printf '```\n\nIf Actions may not create pull requests here (Settings > Actions > General > Workflow permissions), open it here: %s%s?expand=1\n\nThe next run closes this issue once headers-v1 reaches %s.\n\n---\n\n' "$COMPARE" "$BRANCH" "$HEIGHT"
             cat "$RUNNER_TEMP/pr.md"
           } > "$RUNNER_TEMP/issue.md"
           gh issue create --title "$title: open the pull request" --body-file "$RUNNER_TEMP/issue.md"
 
+      - name: Publish to headers-v1
+        id: publish
+        if: steps.derive.outputs.extended == 'true' && env.MODE == 'auto'
+        working-directory: line
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEIGHT: ${{ steps.derive.outputs.height }}
+        run: |
+          bash ../tool/scripts/headers_publish.sh publish "$HEIGHT"
+          {
+            printf 'Published to headers-v1 by the job (HEADERS_PUBLISH=auto). Run: %s\n\n' "$RUN_URL"
+            cat "$RUNNER_TEMP/summary.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Close the proposals this publish supersedes
+        if: steps.derive.outputs.extended == 'true' && env.MODE == 'auto'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEIGHT: ${{ steps.derive.outputs.height }}
+        run: |
+          note="headers-v1 now reaches block $HEIGHT, published by the job (HEADERS_PUBLISH=auto), so this proposal is superseded. Run: $RUN_URL"
+          gh pr list --base headers-v1 --state open --json number,title \
+            --jq '.[] | select(.title | test("^headers-v1: head blob to checkpoint [0-9]+$")) | "\(.number) \(.title)"' > "$RUNNER_TEMP/prs.txt"
+          while read -r number rest; do
+            h=${rest##* }
+            if [ "$h" -le "$HEIGHT" ]; then gh pr close "$number" --comment "$note"; fi
+          done < "$RUNNER_TEMP/prs.txt"
+          gh issue list --state open --search 'in:title "headers-v1: head blob to checkpoint"' --json number,title \
+            --jq '.[] | select(.title | test("^headers-v1: head blob to checkpoint [0-9]+: open the pull request$")) | "\(.number) \(.title)"' > "$RUNNER_TEMP/issues.txt"
+          while read -r number rest; do
+            h=$(printf '%s\n' "$rest" | sed -E 's/^headers-v1: head blob to checkpoint ([0-9]+):.*/\1/')
+            if [ "$h" -le "$HEIGHT" ]; then gh issue close "$number" --comment "$note"; fi
+          done < "$RUNNER_TEMP/issues.txt"
+
       - name: Report a failure as an issue
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          PUBLISHED: ${{ steps.publish.outcome == 'success' }}
+          HEIGHT: ${{ steps.derive.outputs.height }}
         run: |
-          title="Weekly headers-v1 head blob job failed"
+          # One issue per outage: while one is open, later failures add
+          # nothing (a source down for a week is one notice, not seven), and
+          # the next run that succeeds closes it. The old weekly title is
+          # matched too, so an issue opened under it counts as open.
+          title="headers-v1 head blob job failed"
+          existing=$(gh issue list --state open --search 'in:title "head blob job failed"' --json number,title \
+            --jq '[.[] | select(.title == "headers-v1 head blob job failed" or .title == "Weekly headers-v1 head blob job failed")][0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Already reported in issue #$existing; this run adds nothing to it. Run: $RUN_URL"
+            exit 0
+          fi
           {
-            printf 'The scheduled job published nothing. Run: %s\n\n' "$RUN_URL"
+            if [ "$PUBLISHED" = true ]; then
+              printf 'The job published headers-v1 to %s, then a later step failed (closing superseded proposals). Run: %s\n\n' "$HEIGHT" "$RUN_URL"
+            else
+              printf 'The job published nothing: headers-v1 is unchanged. Run: %s\n\n' "$RUN_URL"
+            fi
+            printf 'Later failures add nothing here while this issue is open; the next run that succeeds closes it.\n\n'
             if [ -f "$RUNNER_TEMP/summary.md" ]; then cat "$RUNNER_TEMP/summary.md"; fi
           } > "$RUNNER_TEMP/fail.md"
-          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body-file "$RUNNER_TEMP/fail.md"
-          else
-            gh issue create --title "$title" --body-file "$RUNNER_TEMP/fail.md"
-          fi
+          gh issue create --title "$title" --body-file "$RUNNER_TEMP/fail.md"
+
+      - name: Close the failure issue once a run succeeds
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --state open --search 'in:title "head blob job failed"' --json number,title \
+            --jq '.[] | select(.title == "headers-v1 head blob job failed" or .title == "Weekly headers-v1 head blob job failed") | .number' > "$RUNNER_TEMP/failed.txt"
+          while read -r number; do
+            gh issue close "$number" --comment "This run succeeded, so the failure is over. Run: $RUN_URL"
+          done < "$RUNNER_TEMP/failed.txt"
