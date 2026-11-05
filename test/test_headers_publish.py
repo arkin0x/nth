@@ -232,6 +232,21 @@ class WorkflowTest(unittest.TestCase):
     def test_auto_mode_is_opt_in(self):
         self.assertIn("MODE: ${{ vars.HEADERS_PUBLISH == 'auto' && 'auto' || 'propose' }}", self.text)
 
+    def test_a_failure_is_reported_once_per_outage_and_says_what_happened(self):
+        bodies = {name.strip(): body for name, body in self.steps()}
+        fail = bodies["Report a failure as an issue"]
+        self.assertIn('title="headers-v1 head blob job failed"', fail)
+        self.assertNotIn('title="Weekly', fail)
+        # An open failure issue means this outage is already reported: nothing more is said.
+        self.assertRegex(fail, r'if \[ -n "\$existing" \]; then\n\s+echo "Already reported[^\n]*\n\s+exit 0')
+        self.assertNotIn("gh issue comment", fail)
+        # It says whether headers-v1 moved, rather than always "published nothing".
+        self.assertIn("PUBLISHED: ${{ steps.publish.outcome == 'success' }}", fail)
+        self.assertIn("id: publish", bodies["Publish to headers-v1"])
+        close = bodies["Close the failure issue once a run succeeds"]
+        self.assertRegex(close, r"if: success\(\)")
+        self.assertIn("gh issue close", close)
+
     def test_no_force_push_anywhere(self):
         for text in (self.text, SCRIPT.read_text()):
             self.assertNotRegex(text, r"push[^\n]*(--force|-f\b|\s\+)")

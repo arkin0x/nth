@@ -127,12 +127,15 @@ jobs:
           if [ "$code" = 10 ]; then echo "The head is already at the newest checkpoint height."; echo "extended=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           [ "$code" = 0 ]
           height=$(python3 -I -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["checkpoint"]["height"]))' "$RUNNER_TEMP/summary.json")
-          echo "height=$height" >> "$GITHUB_OUTPUT"
-          echo "branch=auto/headers-head-$height" >> "$GITHUB_OUTPUT"
-          # A word, not a number: a skipped step's outputs are null, and GitHub
-          # compares null with '0' as 0 == 0, which once ran the push step after
-          # a skipped derive (run 41401521166). Null never equals 'true'.
-          echo "extended=true" >> "$GITHUB_OUTPUT"
+          # extended is a word, not a number: a skipped step's outputs are
+          # null, and GitHub compares null with '0' as 0 == 0, which once ran
+          # the push step after a skipped derive (run 41401521166). Null never
+          # equals 'true'.
+          {
+            echo "height=$height"
+            echo "branch=auto/headers-head-$height"
+            echo "extended=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Push the proposal branch
         if: steps.derive.outputs.extended == 'true' && env.MODE != 'auto'
@@ -158,6 +161,8 @@ jobs:
           fi
           cat "$RUNNER_TEMP/pr.err"
           {
+            # The backticks are Markdown for the issue, not command substitution.
+            # shellcheck disable=SC2016
             printf 'The job verified and pushed `%s` but could not open the pull request. GitHub said:\n\n```\n' "$BRANCH"
             cat "$RUNNER_TEMP/pr.err"
             printf '```\n\nIf Actions may not create pull requests here (Settings > Actions > General > Workflow permissions), open it here: %s%s?expand=1\n\nThe next run closes this issue once headers-v1 reaches %s.\n\n---\n\n' "$COMPARE" "$BRANCH" "$HEIGHT"
@@ -166,6 +171,7 @@ jobs:
           gh issue create --title "$title: open the pull request" --body-file "$RUNNER_TEMP/issue.md"
 
       - name: Publish to headers-v1
+        id: publish
         if: steps.derive.outputs.extended == 'true' && env.MODE == 'auto'
         working-directory: line
         env:
@@ -202,15 +208,38 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          PUBLISHED: ${{ steps.publish.outcome == 'success' }}
+          HEIGHT: ${{ steps.derive.outputs.height }}
         run: |
-          title="Weekly headers-v1 head blob job failed"
+          # One issue per outage: while one is open, later failures add
+          # nothing (a source down for a week is one notice, not seven), and
+          # the next run that succeeds closes it. The old weekly title is
+          # matched too, so an issue opened under it counts as open.
+          title="headers-v1 head blob job failed"
+          existing=$(gh issue list --state open --search 'in:title "head blob job failed"' --json number,title \
+            --jq '[.[] | select(.title == "headers-v1 head blob job failed" or .title == "Weekly headers-v1 head blob job failed")][0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Already reported in issue #$existing; this run adds nothing to it. Run: $RUN_URL"
+            exit 0
+          fi
           {
-            printf 'The scheduled job published nothing. Run: %s\n\n' "$RUN_URL"
+            if [ "$PUBLISHED" = true ]; then
+              printf 'The job published headers-v1 to %s, then a later step failed (closing superseded proposals). Run: %s\n\n' "$HEIGHT" "$RUN_URL"
+            else
+              printf 'The job published nothing: headers-v1 is unchanged. Run: %s\n\n' "$RUN_URL"
+            fi
+            printf 'Later failures add nothing here while this issue is open; the next run that succeeds closes it.\n\n'
             if [ -f "$RUNNER_TEMP/summary.md" ]; then cat "$RUNNER_TEMP/summary.md"; fi
           } > "$RUNNER_TEMP/fail.md"
-          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body-file "$RUNNER_TEMP/fail.md"
-          else
-            gh issue create --title "$title" --body-file "$RUNNER_TEMP/fail.md"
-          fi
+          gh issue create --title "$title" --body-file "$RUNNER_TEMP/fail.md"
+
+      - name: Close the failure issue once a run succeeds
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --state open --search 'in:title "head blob job failed"' --json number,title \
+            --jq '.[] | select(.title == "headers-v1 head blob job failed" or .title == "Weekly headers-v1 head blob job failed") | .number' > "$RUNNER_TEMP/failed.txt"
+          while read -r number; do
+            gh issue close "$number" --comment "This run succeeded, so the failure is over. Run: $RUN_URL"
+          done < "$RUNNER_TEMP/failed.txt"

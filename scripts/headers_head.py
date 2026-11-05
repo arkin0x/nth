@@ -17,8 +17,8 @@ Nothing is believed because a server said it. The tool:
      bits equal to the exact retarget result at every 2016th block and
      unchanged elsewhere, time above the median of the previous eleven, and
      the BIP34/66/65 minimum versions;
-     every height in PINNED (the 19 checkpoints ONOSENDAI, cyberspace-mcp and
-     hosaka-core embed) and every manifest checkpoint must match;
+     every height in PINNED (genesis and the 20 checkpoints ONOSENDAI,
+     cyberspace-mcp and hosaka-core embed) and every manifest checkpoint must match;
   2. fetches only the new headers from one Esplora source and puts each
      through the same rules, also requiring the source's own id and
      previousblockhash to agree with the rebuilt chain;
@@ -57,9 +57,10 @@ MIN_DEPTH = 100
 
 GENESIS_HASH = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 
-#: The 19 checkpoints embedded in ONOSENDAI src/lib/hyperspace/checkpoints.ts,
-#: cyberspace-mcp src/hyperspace/checkpoints.ts and hosaka-core
-#: src/hosaka_core/headers.py (pinned 2026-08-24, each confirmed against
+#: Genesis and the 20 checkpoints embedded in ONOSENDAI
+#: src/lib/hyperspace/checkpoints.ts, cyberspace-mcp src/hyperspace/checkpoints.ts
+#: and hosaka-core src/hosaka_core/headers.py (49,999 to 949,999 pinned
+#: 2026-08-24, 971,999 with headers-v1 #4 on 2026-10-23; each confirmed against
 #: blockstream.info). A manifest that disagrees with any of them is refused.
 PINNED: Dict[int, str] = {
     0: GENESIS_HASH,
@@ -82,6 +83,7 @@ PINNED: Dict[int, str] = {
     849999: "000000000000000000026b072f9347d86942f6786dd1fc362acfd9522715b313",
     899999: "0000000000000000000196400396be46d0816dc462df4c3450972f589f4d7d24",
     949999: "00000000000000000000df842728edc58cf64288ca21433257700f3d5b45f286",
+    971999: "00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82",
 }
 
 DEFAULT_SOURCE = "https://mempool.space/api"
@@ -479,7 +481,7 @@ New checkpoint: `{cp['height']}` = `{cp['blockHash']}`
 
 ### What was checked (scripts/headers_head.py on master)
 
-- The whole published line was re-verified from genesis before anything was added: linkage, proof of work, bits equal to the exact retarget result at every 2016th block and unchanged elsewhere, time above the median of the previous 11, the BIP34/66/65 minimum versions, every manifest checkpoint, and the 19 checkpoints ONOSENDAI, cyberspace-mcp and hosaka-core embed.
+- The whole published line was re-verified from genesis before anything was added: linkage, proof of work, bits equal to the exact retarget result at every 2016th block and unchanged elsewhere, time above the median of the previous 11, the BIP34/66/65 minimum versions, every manifest checkpoint, and the 20 checkpoints ONOSENDAI, cyberspace-mcp and hosaka-core embed.
 - {s['recordsAdded']:,} new headers came from {s['source']} and passed the same rules; each one's rebuilt hash equals the source's id, and its previousblockhash equals the line's.
 - Tips: {tips}. The checkpoint is {s['depth']:,} blocks deep ({s['minDepth']} required).
 - Every checkpoint height added was cross-checked against two other sources:
