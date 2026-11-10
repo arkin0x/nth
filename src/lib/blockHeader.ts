@@ -119,6 +119,12 @@ export type HeaderMissing = {
  * never a reason to give up: that refuses to sign, every time, because the
  * source is wrong rather than down.
  *
+ * Once a header has MISMATCHED at a height (`mismatched`), that height never
+ * falls back again in this process: a source that served a wrong header is
+ * not trusted to be merely "down" on the next try, so a fail, mismatch, fail
+ * sequence keeps refusing instead of signing without the tag. A restart
+ * clears it, and the operator sees the refusals in the log meanwhile.
+ *
  * The tag is optional (DECK-0001 §2.5) while the line is not: a header
  * endpoint that stays down must not stall every anchor behind it. So after
  * `maxAttempts` failures or `maxWaitMs` since the first one at a height,
@@ -128,6 +134,8 @@ export type HeaderMissing = {
 export type HeaderFallback = {
   /** Record one fetch failure at `height`; true means sign without the header now. */
   giveUp: (height: number, blockHash: string, error: unknown) => boolean;
+  /** Record that the header served for `height` did not match; it never falls back after this. */
+  mismatched: (height: number) => void;
 };
 
 export function createHeaderFallback(opts: {
@@ -138,9 +146,14 @@ export function createHeaderFallback(opts: {
 }): HeaderFallback {
   const now = opts.now ?? Date.now;
   let current: { height: number; attempts: number; firstAt: number } | null = null;
+  const poisoned = new Set<number>();
 
   return {
+    mismatched(height) {
+      poisoned.add(height);
+    },
     giveUp(height, blockHash, error) {
+      if (poisoned.has(height)) return false;
       if (!current || current.height !== height) current = { height, attempts: 0, firstAt: now() };
       current.attempts++;
       const waited = now() - current.firstAt;

@@ -224,6 +224,32 @@ test('--from-missing takes the heights the publisher signed without a header', a
   }
 });
 
+test('--from-missing skips heights already backfilled, so they do not count toward --many', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  const all = [1, 2, 3, 4, 5, 6, 7];
+  writeArchive(home, all.map((h) => archivedAnchor(h, sk)));
+  mkdirSync(join(home, 'state'), { recursive: true });
+  writeFileSync(
+    join(home, 'state', 'tip.header-missing.ndjson'),
+    all.map((height) => JSON.stringify({ at: 1, height, blockHash: blockHash(height), attempts: 5, reason: 'x' })).join('\n') + '\n',
+  );
+  const opts = { home, relay: relay.url, esplora: esplora.url, privateKey: sk };
+  try {
+    const first = await run(['--publish', '1,2'], opts);
+    assert.equal(first.code, 0, first.out);
+    const { code, out } = await run(['--from-missing'], opts);
+    assert.equal(code, 0, out);
+    assert.match(out, /skipping 2 height\(s\) already backfilled \(1, 2\)/);
+    assert.deepEqual(printedEvents(out).map((e) => tagOf(e, 'B')), ['3', '4', '5', '6', '7'], 'five left: no --many needed');
+  } finally {
+    await relay.close();
+    await esplora.close();
+  }
+});
+
 test('--publish refuses to run while another run holds the backfill-header lock', async () => {
   const esplora = await startEsplora({ tip: 20 });
   const relay = await startRelay({ requireAuth: true });

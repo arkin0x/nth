@@ -117,14 +117,39 @@ if (FROM_MISSING) {
   if (!existsSync(MISSING)) {
     console.error(`--from-missing: no header-missing file at ${MISSING}`);
   } else {
+    // Heights this script already signed a copy for are done: skip them here,
+    // before the --many count, so the list does not grow with every run. To
+    // resend such a copy (say a relay refused it), name the height explicitly.
+    const done = new Set();
+    if (existsSync(BACKFILL_ARCHIVE)) {
+      const signed = createInterface({ input: createReadStream(BACKFILL_ARCHIVE, 'utf8'), crlfDelay: Infinity });
+      for await (const line of signed) {
+        try {
+          const ev = JSON.parse(line);
+          const b = ev.tags?.find((t) => t[0] === 'B')?.[1];
+          if (b !== undefined && ev.tags.some((t) => t[0] === 'header')) done.add(Number.parseInt(b, 10));
+        } catch {
+          // a torn line counts as not done
+        }
+      }
+    }
+    const listed = new Set();
     const lines = createInterface({ input: createReadStream(MISSING, 'utf8'), crlfDelay: Infinity });
     for await (const line of lines) {
       try {
         const h = JSON.parse(line).height;
-        if (Number.isSafeInteger(h) && h >= 0) heights.push(h);
+        if (Number.isSafeInteger(h) && h >= 0) listed.add(h);
       } catch {
         // a torn line is skipped; the anchor is still in the archive
       }
+    }
+    const skipped = [...listed].filter((h) => done.has(h));
+    for (const h of listed) if (!done.has(h)) heights.push(h);
+    if (skipped.length > 0) {
+      console.log(
+        `--from-missing: skipping ${skipped.length} height(s) already backfilled (${skipped.sort((x, y) => x - y).join(', ')}); ` +
+          'name a height explicitly to resend its copy.',
+      );
     }
   }
 }

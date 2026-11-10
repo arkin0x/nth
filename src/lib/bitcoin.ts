@@ -51,6 +51,9 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
         responseType: 'text',
         validateStatus: () => true,
         timeout: bitcoinApiTimeoutMs(),
+        // A hard backstop a second later, in case a phase the axios timer
+        // does not cover (a stalled socket setup) ever hangs.
+        signal: AbortSignal.timeout(bitcoinApiTimeoutMs() + 1_000),
       });
 
       return { status: res.status, data: String(res.data ?? '').trim() };
@@ -67,6 +70,9 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
         transformResponse: (r) => r,
         validateStatus: () => true,
         timeout: bitcoinApiTimeoutMs(),
+        // A hard backstop a second later, in case a phase the axios timer
+        // does not cover (a stalled socket setup) ever hangs.
+        signal: AbortSignal.timeout(bitcoinApiTimeoutMs() + 1_000),
       });
 
       const rawBody = String(res.data ?? '');

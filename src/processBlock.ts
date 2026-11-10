@@ -70,6 +70,9 @@ export async function signAnchor(opts: {
       prevBlockHash: block.prevBlockHash ? lc(block.prevBlockHash) : null,
     });
     if (headerProblem) {
+      // A wrong header poisons the fallback for this height: later fetch
+      // failures here must keep refusing, never sign without the tag.
+      opts.headerFallback?.mismatched(blockHeight);
       throw new Error(`Refusing to sign block ${blockHeight}: the Bitcoin API's header does not match the block (${headerProblem})`);
     }
   }

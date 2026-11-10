@@ -237,6 +237,56 @@ test('createHeaderFallback gives up after maxAttempts or maxWaitMs, whichever fi
 const headerMissing = (home) => readNdjson(join(home, 'state', 'tip.header-missing.ndjson'));
 const signingsOf = (home, h) => archive(home).filter((e) => tagOf(e, 'B') === String(h));
 
+test('createHeaderFallback: after a mismatch at a height, it never gives up there again', () => {
+  const missing = [];
+  const fb = createHeaderFallback({ maxAttempts: 2, maxWaitMs: 0, onMissing: (m) => missing.push(m) });
+  const err = new Error('HTTP 500');
+  // maxWaitMs 0 would give up on the very first failure, were it not for the mismatch.
+  fb.mismatched(7);
+  for (let i = 0; i < 10; i++) assert.equal(fb.giveUp(7, 'aa', err), false, `failure ${i + 1} after the mismatch`);
+  assert.deepEqual(missing, []);
+  // Other heights are unaffected.
+  assert.equal(fb.giveUp(8, 'bb', err), true);
+  assert.equal(missing[0].height, 8);
+  assert.equal(fb.giveUp(7, 'aa', err), false, 'still poisoned after moving on and back');
+});
+
+test('fail, mismatch, then fails: the block is never signed without the tag', async () => {
+  let n = 0;
+  const esplora = await startEsplora({
+    tip: 104,
+    header: (h, real) => {
+      if (h !== 101) return real;
+      n++;
+      return n === 2 ? corrupt(real, 68) : { status: 500, body: 'oops' };
+    },
+  });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  writeStateFile(home, 100);
+  const w = startWorker({
+    home,
+    relay: relay.url,
+    esplora: esplora.url,
+    privateKey: generatePrivateKey(),
+    env: { NTH_HEADER_MAX_ATTEMPTS: '3' },
+  });
+  try {
+    // 1 fail, 1 mismatch, then well past the 3-attempt limit in failures.
+    await waitFor(() => (esplora.headerRequests.get(101) || 0) >= 8, { what: 'eight header requests for 101' });
+    assert.equal(stateNext(home), 101, 'never moved past 101');
+  } finally {
+    await w.stop();
+    await relay.close();
+    await esplora.close();
+  }
+  assert.match(w.out, /Refusing to sign block 101/);
+  assert.doesNotMatch(w.out, /Signing block 101 WITHOUT the header tag/);
+  assert.deepEqual([...new Set(relay.eventsReceived.map((e) => tagOf(e, 'B')))], ['100'], 'nothing sent for 101');
+  assert.equal(signingsOf(home, 101).length, 0, 'nothing signed for 101');
+  assert.equal(headerMissing(home).length, 0);
+});
+
 /** Run the worker from 100 until the state reaches `until`, then stop everything. */
 async function runWorker({ header, env = {}, until = 104, pendingEvent = null, privateKey = generatePrivateKey() }) {
   const esplora = await startEsplora({ tip: until, header });
