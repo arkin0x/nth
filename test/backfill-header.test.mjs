@@ -15,7 +15,7 @@ const { headerFields } = await import('../dist/lib/blockHeader.js');
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/backfill-header-tag.mjs');
 
 /** An archived anchor for fake height h in today's format, without a header tag. */
-function archivedAnchor(h, privateKey, extraTags = []) {
+function archivedAnchor(h, privateKey, extraTags = [], { legacy = false } = {}) {
   const f = headerFields(blockHeader(h));
   return finishEvent(
     {
@@ -24,7 +24,8 @@ function archivedAnchor(h, privateKey, extraTags = []) {
       content: `Block ${h}`,
       tags: [
         ['C', f.merkleRoot],
-        ['M', f.merkleRoot],
+        // A legacy anchor (DECK-0001 §2.2) has no M: its C is the merkle root.
+        ...(legacy ? [] : [['M', f.merkleRoot]]),
         ['X', '1'],
         ['Y', '2'],
         ['Z', '3'],
@@ -95,6 +96,7 @@ test('dry run prints the copy with the header and writes and sends nothing', asy
     );
     assert.equal(ev.tags.findIndex((t) => t[0] === 'header'), ev.tags.findIndex((t) => t[0] === 'B') + 1);
     assert.equal(ev.content, original.content);
+    assert.equal(ev.created_at, original.created_at + 1, 'sorts beside its original, never as the newest anchor');
     assert.equal(ev.pubkey, getPublicKey(sk));
     assert.notEqual(ev.id, original.id);
     assert.equal(relay.eventsReceived.length, 0, 'nothing sent');
@@ -130,6 +132,123 @@ test('--publish sends one copy to the primary and the mirror; a rerun resends th
   } finally {
     await primary.close();
     await mirror.close();
+    await esplora.close();
+  }
+});
+
+test('a legacy anchor without M gets its header checked against C', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  writeArchive(home, [archivedAnchor(9, sk, [], { legacy: true })]);
+  try {
+    const { code, out } = await run(['--publish', '9'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(code, 0, out);
+    const [ev] = [...relay.stored.values()];
+    assert.equal(tagOf(ev, 'M'), undefined, 'still legacy: nothing added but the header');
+    assert.equal(tagOf(ev, 'header'), blockHeader(9));
+  } finally {
+    await relay.close();
+    await esplora.close();
+  }
+});
+
+test('a relay refusal, then a rerun during an API outage resends the same id without calling the API', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  let refuse = true;
+  const relay = await startRelay({ requireAuth: true, policy: () => (refuse ? [false, 'error: try later'] : null) });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  writeArchive(home, [archivedAnchor(15, sk)]);
+
+  try {
+    const first = await run(['--publish', '15'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(first.code, 1, first.out);
+    assert.match(first.out, /REFUSED/);
+    const sentFirst = relay.eventsReceived.map((e) => e.id);
+    assert.equal(sentFirst.length, 1);
+
+    await esplora.close(); // the Bitcoin API is now down
+    refuse = false;
+    const second = await run(['--publish', '15'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(second.code, 0, second.out);
+    assert.match(second.out, /REUSING the copy already signed; no API call/);
+    assert.equal(relay.eventsReceived.length, 2);
+    assert.equal(relay.eventsReceived[1].id, sentFirst[0], 'the rerun resent the same id');
+    assert.equal(relay.stored.size, 1);
+    assert.equal(readNdjson(backfillArchive(home)).length, 1, 'signed once');
+  } finally {
+    await relay.close();
+  }
+});
+
+test('more than 5 heights need --many', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  writeArchive(home, [1, 2, 3, 4, 5, 6].map((h) => archivedAnchor(h, sk)));
+  try {
+    const refused = await run(['1,2,3,4,5,6'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(refused.code, 1);
+    assert.match(refused.out, /Refusing 6 heights without --many/);
+    const allowed = await run(['--many', '1,2,3,4,5,6'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(allowed.code, 0, allowed.out);
+    assert.equal(printedEvents(allowed.out).length, 6);
+  } finally {
+    await relay.close();
+    await esplora.close();
+  }
+});
+
+test('--from-missing takes the heights the publisher signed without a header', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  writeArchive(home, [archivedAnchor(11, sk), archivedAnchor(13, sk)]);
+  mkdirSync(join(home, 'state'), { recursive: true });
+  writeFileSync(
+    join(home, 'state', 'tip.header-missing.ndjson'),
+    [11, 13, 11].map((height) => JSON.stringify({ at: 1, height, blockHash: blockHash(height), attempts: 5, reason: 'HTTP 503' })).join('\n') + '\n',
+  );
+  try {
+    const { code, out } = await run(['--from-missing'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(code, 0, out);
+    assert.match(out, /Heights: {2}11, 13/);
+    assert.deepEqual(printedEvents(out).map((e) => tagOf(e, 'B')), ['11', '13']);
+  } finally {
+    await relay.close();
+    await esplora.close();
+  }
+});
+
+test('--publish refuses to run while another run holds the backfill-header lock', async () => {
+  const esplora = await startEsplora({ tip: 20 });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  const sk = generatePrivateKey();
+  writeArchive(home, [archivedAnchor(15, sk)]);
+  const RUNTIME = resolve(dirname(SCRIPT), '../dist/lib/runtime.js');
+  const holder = spawn(
+    process.execPath,
+    ['--input-type=module', '-e', `const { acquireToolLock } = await import(${JSON.stringify(RUNTIME)}); await acquireToolLock('backfill-header'); console.log('held'); setInterval(() => {}, 1000);`],
+    { env: { PATH: process.env.PATH, NTH_HOME: home } },
+  );
+  try {
+    await new Promise((r, j) => {
+      holder.stdout.on('data', (d) => String(d).includes('held') && r());
+      holder.on('exit', (c) => j(new Error(`lock holder exited ${c}`)));
+    });
+    const { code, out } = await run(['--publish', '15'], { home, relay: relay.url, esplora: esplora.url, privateKey: sk });
+    assert.equal(code, 1);
+    assert.match(out, /Another backfill-header run holds the lock/);
+    assert.equal(relay.eventsReceived.length, 0);
+    assert.equal(existsSync(backfillArchive(home)), false);
+  } finally {
+    holder.kill();
+    await relay.close();
     await esplora.close();
   }
 });

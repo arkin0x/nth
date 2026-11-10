@@ -2,12 +2,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { generatePrivateKey, getEventHash, verifySignature } from 'nostr-tools';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { finishEvent, generatePrivateKey, getEventHash, verifySignature } from 'nostr-tools';
 
 import {
+  HANG,
+  archive,
   blockHash,
   blockHeader,
   makeHome,
+  readNdjson,
   startEsplora,
   startRelay,
   startWorker,
@@ -18,7 +24,7 @@ import {
   sleep,
 } from './helpers/fakes.mjs';
 
-const { blockHashOfHeader, headerFields, headerMismatch, HEADER_TAG } = await import('../dist/lib/blockHeader.js');
+const { blockHashOfHeader, createHeaderFallback, headerFields, headerMismatch, HEADER_TAG } = await import('../dist/lib/blockHeader.js');
 const { signAnchor } = await import('../dist/processBlock.js');
 
 // Mainnet block 973,727, the last block of retarget window 482
@@ -180,7 +186,14 @@ test('a lying header stops the worker at that height: nothing is signed or publi
   const home = makeHome();
   writeStateFile(home, 100);
 
-  const w = startWorker({ home, relay: relay.url, esplora: esplora.url, privateKey: generatePrivateKey() });
+  // A fallback limit of one attempt proves a mismatch never falls back.
+  const w = startWorker({
+    home,
+    relay: relay.url,
+    esplora: esplora.url,
+    privateKey: generatePrivateKey(),
+    env: { NTH_HEADER_MAX_ATTEMPTS: '1', NTH_HEADER_MAX_WAIT_MS: '0' },
+  });
   try {
     await waitFor(() => stateNext(home) === 101, { what: 'state to reach 101' });
     await waitFor(() => (w.out.match(/Refusing to sign block 101/g) || []).length >= 2, {
@@ -196,4 +209,148 @@ test('a lying header stops the worker at that height: nothing is signed or publi
 
   const heights = [...relay.eventsReceived].map((ev) => tagOf(ev, 'B'));
   assert.deepEqual([...new Set(heights)], ['100'], 'only block 100 was ever sent');
+  assert.equal(readNdjson(join(home, 'state', 'tip.header-missing.ndjson')).length, 0, 'a mismatch is never recorded as missing');
+});
+
+test('createHeaderFallback gives up after maxAttempts or maxWaitMs, whichever first, and resets per height', () => {
+  let t = 0;
+  const missing = [];
+  const fb = createHeaderFallback({ maxAttempts: 3, maxWaitMs: 1000, now: () => t, onMissing: (m) => missing.push(m) });
+  const err = new Error('HTTP 500');
+  assert.equal(fb.giveUp(7, 'aa', err), false);
+  assert.equal(fb.giveUp(7, 'aa', err), false);
+  assert.equal(fb.giveUp(7, 'aa', err), true, 'third failure at one height');
+  assert.deepEqual(missing, [{ height: 7, blockHash: 'aa', attempts: 3, reason: 'HTTP 500' }]);
+
+  // A new height starts over; time alone also gives up.
+  assert.equal(fb.giveUp(8, 'bb', err), false);
+  t = 999;
+  assert.equal(fb.giveUp(8, 'bb', err), false);
+  // Moving on to 9 and back to 8 is a fresh start for 8.
+  assert.equal(fb.giveUp(9, 'cc', err), false);
+  t = 5000;
+  assert.equal(fb.giveUp(9, 'cc', err), true, 'maxWaitMs since the first failure at 9');
+  assert.equal(missing.length, 2);
+  assert.equal(missing[1].height, 9);
+});
+
+const headerMissing = (home) => readNdjson(join(home, 'state', 'tip.header-missing.ndjson'));
+const signingsOf = (home, h) => archive(home).filter((e) => tagOf(e, 'B') === String(h));
+
+/** Run the worker from 100 until the state reaches `until`, then stop everything. */
+async function runWorker({ header, env = {}, until = 104, pendingEvent = null, privateKey = generatePrivateKey() }) {
+  const esplora = await startEsplora({ tip: until, header });
+  const relay = await startRelay({ requireAuth: true });
+  const home = makeHome();
+  writeStateFile(home, 100);
+  if (pendingEvent) {
+    mkdirSync(join(home, 'state'), { recursive: true });
+    writeFileSync(join(home, 'state', 'tip.pending.json'), JSON.stringify({ height: 100, archived: false, event: pendingEvent(privateKey) }));
+  }
+  const w = startWorker({ home, relay: relay.url, esplora: esplora.url, privateKey, env });
+  try {
+    await waitFor(() => stateNext(home) === until, { what: `state to reach ${until}` });
+  } finally {
+    await w.stop();
+    await relay.close();
+    await esplora.close();
+  }
+  const byHeight = (h) => [...relay.stored.values()].filter((e) => tagOf(e, 'B') === String(h));
+  return { home, out: w.out, esplora, byHeight };
+}
+
+test('header fetch failures (500, 404, malformed) then recovery: signed once, with the header', async () => {
+  const failures = [{ status: 500, body: 'oops' }, { status: 404, body: 'Block not found' }, 'not-a-header'];
+  let n = 0;
+  const r = await runWorker({
+    header: (h, real) => (h === 101 && n < failures.length ? failures[n++] : real),
+    env: { NTH_HEADER_MAX_ATTEMPTS: '10' },
+  });
+  assert.equal(r.esplora.headerRequests.get(101), 4, 'three failures, then the real header');
+  assert.equal(signingsOf(r.home, 101).length, 1, 'block 101 signed exactly once');
+  assert.equal(r.byHeight(101).length, 1);
+  assert.equal(tagOf(r.byHeight(101)[0], 'header'), blockHeader(101));
+  assert.equal(headerMissing(r.home).length, 0);
+});
+
+test('a header that cannot be fetched N times is signed without the tag and recorded as missing', async () => {
+  const r = await runWorker({
+    header: (h, real) => (h === 101 ? { status: 503, body: 'down' } : real),
+    env: { NTH_HEADER_MAX_ATTEMPTS: '3' },
+  });
+  assert.equal(r.esplora.headerRequests.get(101), 3);
+  assert.equal(signingsOf(r.home, 101).length, 1, 'signed once, after the third failure');
+  const [ev] = r.byHeight(101);
+  assert.equal(tagOf(ev, 'header'), undefined, 'no header tag');
+  assert.equal(tagOf(ev, 'H'), blockHash(101));
+  for (const h of [100, 102, 103]) assert.equal(tagOf(r.byHeight(h)[0], 'header'), blockHeader(h));
+  const missing = headerMissing(r.home);
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0].height, 101);
+  assert.equal(missing[0].blockHash, blockHash(101));
+  assert.equal(missing[0].attempts, 3);
+  assert.match(missing[0].reason, /HTTP 503/);
+  assert.match(r.out, /Signing block 101 WITHOUT the header tag/);
+});
+
+test('the fallback also fires on time alone (NTH_HEADER_MAX_WAIT_MS)', async () => {
+  const r = await runWorker({
+    header: (h, real) => (h === 101 ? { status: 500, body: '' } : real),
+    env: { NTH_HEADER_MAX_ATTEMPTS: '100000', NTH_HEADER_MAX_WAIT_MS: '150' },
+  });
+  assert.equal(tagOf(r.byHeight(101)[0], 'header'), undefined);
+  assert.equal(signingsOf(r.home, 101).length, 1);
+  assert.equal(headerMissing(r.home)[0].height, 101);
+  assert.ok(headerMissing(r.home)[0].attempts >= 2);
+});
+
+test('a hung header request times out (NTH_BITCOIN_API_TIMEOUT_MS) into the retry loop and recovers', async () => {
+  let hangs = 0;
+  const r = await runWorker({
+    header: (h, real) => (h === 101 && hangs < 2 ? (hangs++, HANG) : real),
+    env: { NTH_BITCOIN_API_TIMEOUT_MS: '200', NTH_HEADER_MAX_ATTEMPTS: '10' },
+  });
+  assert.match(r.out, /timeout of 200ms exceeded/);
+  assert.equal(r.esplora.headerRequests.get(101), 3);
+  assert.equal(tagOf(r.byHeight(101)[0], 'header'), blockHeader(101));
+  assert.equal(signingsOf(r.home, 101).length, 1);
+});
+
+test('upgrade path: a pending anchor signed before the deploy (no header) is reused as is', async () => {
+  // What the old code left in state/tip.pending.json for height 100.
+  const oldAnchor = (sk) => {
+    const f = headerFields(blockHeader(100));
+    return finishEvent(
+      {
+        kind: 321,
+        created_at: Math.floor(Date.now() / 1000) - 60,
+        content: 'Block 100',
+        tags: [
+          ['C', f.merkleRoot],
+          ['M', f.merkleRoot],
+          ['H', blockHash(100)],
+          ['P', f.prevBlockHash],
+          ['N', blockHash(101)],
+          ['B', '100'],
+          ['net', 'mainnet'],
+        ],
+      },
+      sk,
+    );
+  };
+  let pendingId = null;
+  const r = await runWorker({
+    until: 102,
+    pendingEvent: (sk) => {
+      const ev = oldAnchor(sk);
+      pendingId = ev.id;
+      return ev;
+    },
+  });
+  assert.match(r.out, /Reusing the anchor already signed for block 100/);
+  const [ev100] = r.byHeight(100);
+  assert.equal(ev100.id, pendingId, 'the pre-deploy event, not a new signing');
+  assert.equal(tagOf(ev100, 'header'), undefined);
+  assert.equal(r.esplora.headerRequests.get(100) ?? 0, 0, 'no header fetched for a reused anchor');
+  assert.equal(tagOf(r.byHeight(101)[0], 'header'), blockHeader(101), 'the next block has the header');
 });

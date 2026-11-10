@@ -30,6 +30,18 @@ export type BitcoinApi = {
   getBlockHeader(hash: string, opts?: { heightHint?: number }): Promise<string>;
 };
 
+/**
+ * How long one Bitcoin API request may take before it fails, from
+ * NTH_BITCOIN_API_TIMEOUT_MS (default 15 s). Without it a request that never
+ * answers hangs the worker forever; with it the timeout throws like any other
+ * network error, into the caller's retry loop. Read per request, so a value
+ * loaded by dotenv after import still applies.
+ */
+export function bitcoinApiTimeoutMs(): number {
+  const raw = Number.parseInt((process.env.NTH_BITCOIN_API_TIMEOUT_MS || '').trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+}
+
 export function createBitcoinApi(baseUrl: string): BitcoinApi {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
 
@@ -38,6 +50,7 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
       const res = await axios.get(url, {
         responseType: 'text',
         validateStatus: () => true,
+        timeout: bitcoinApiTimeoutMs(),
       });
 
       return { status: res.status, data: String(res.data ?? '').trim() };
@@ -53,6 +66,7 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
         responseType: 'text',
         transformResponse: (r) => r,
         validateStatus: () => true,
+        timeout: bitcoinApiTimeoutMs(),
       });
 
       const rawBody = String(res.data ?? '');

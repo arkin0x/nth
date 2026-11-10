@@ -102,3 +102,54 @@ export function headerMismatch(
   }
   return null;
 }
+
+/** A height whose anchor was signed without the header, for the backfill script. */
+export type HeaderMissing = {
+  height: number;
+  blockHash: string;
+  attempts: number;
+  reason: string;
+};
+
+/**
+ * When to stop waiting for a header that cannot be FETCHED and sign without it.
+ *
+ * Only fetch failures count (a network error, a timeout, an HTTP error status,
+ * a malformed body). A header that arrives but does not match the block is
+ * never a reason to give up: that refuses to sign, every time, because the
+ * source is wrong rather than down.
+ *
+ * The tag is optional (DECK-0001 §2.5) while the line is not: a header
+ * endpoint that stays down must not stall every anchor behind it. So after
+ * `maxAttempts` failures or `maxWaitMs` since the first one at a height,
+ * whichever comes first, `giveUp` reports the height through `onMissing` and
+ * says yes. The backfill script reads those heights back later.
+ */
+export type HeaderFallback = {
+  /** Record one fetch failure at `height`; true means sign without the header now. */
+  giveUp: (height: number, blockHash: string, error: unknown) => boolean;
+};
+
+export function createHeaderFallback(opts: {
+  maxAttempts: number;
+  maxWaitMs: number;
+  onMissing: (missing: HeaderMissing) => void;
+  now?: () => number;
+}): HeaderFallback {
+  const now = opts.now ?? Date.now;
+  let current: { height: number; attempts: number; firstAt: number } | null = null;
+
+  return {
+    giveUp(height, blockHash, error) {
+      if (!current || current.height !== height) current = { height, attempts: 0, firstAt: now() };
+      current.attempts++;
+      const waited = now() - current.firstAt;
+      if (current.attempts < opts.maxAttempts && waited < opts.maxWaitMs) return false;
+
+      const reason = error instanceof Error ? error.message : String(error);
+      opts.onMissing({ height, blockHash, attempts: current.attempts, reason });
+      current = null;
+      return true;
+    },
+  };
+}

@@ -177,12 +177,17 @@ function fakeBlock(h) {
 export const blockHash = (h) => fakeBlock(h).hash;
 export const blockHeader = (h) => fakeBlock(h).header;
 
+/** Returned by a fake Esplora `header` override: never answer the request. */
+export const HANG = Symbol('hang');
+
 /**
  * Fake Esplora: blocks 0..tip exist. `header(height, realHeaderHex)` may
- * override what GET /block/:hash/header serves, to play a lying API.
+ * override what GET /block/:hash/header serves, to play a lying or failing
+ * API: return a string (served with 200), `{ status, body }`, or HANG.
+ * `headerRequests` counts the header requests per height.
  */
 export async function startEsplora({ tip, header = (_h, real) => real }) {
-  const api = { tip, url: '' };
+  const api = { tip, url: '', headerRequests: new Map() };
   const server = createServer((req, res) => {
     const send = (status, body, type = 'text/plain') => {
       res.writeHead(status, { 'content-type': type });
@@ -196,7 +201,12 @@ export async function startEsplora({ tip, header = (_h, real) => real }) {
     }
     if ((m = req.url.match(/^\/block\/([0-9a-f]{64})\/header$/))) {
       for (let h = 0; h <= api.tip; h++) {
-        if (blockHash(h) === m[1]) return send(200, header(h, blockHeader(h)));
+        if (blockHash(h) === m[1]) {
+          api.headerRequests.set(h, (api.headerRequests.get(h) || 0) + 1);
+          const r = header(h, blockHeader(h));
+          if (r === HANG) return; // the socket stays open, unanswered
+          return typeof r === 'string' ? send(200, r) : send(r.status, r.body);
+        }
       }
       return send(404, 'Block not found');
     }
@@ -221,7 +231,11 @@ export async function startEsplora({ tip, header = (_h, real) => real }) {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   api.url = `http://127.0.0.1:${server.address().port}`;
-  api.close = () => new Promise((r) => server.close(r));
+  api.close = () =>
+    new Promise((r) => {
+      server.close(r);
+      server.closeAllConnections(); // hung (HANG) requests would hold close() forever
+    });
   return api;
 }
 

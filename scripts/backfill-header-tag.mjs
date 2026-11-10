@@ -6,32 +6,44 @@
  * Why: readers that need block time (ONOSENDAI's block-paced clock wants the
  * header time of each retarget window's last block, height 2016k + 2015) can
  * only take it from a header that hashes to the anchor's H. Anchors signed
- * before the publisher learned the header tag lack it; this adds it for the
- * heights that matter, without touching the corpus otherwise.
+ * before the publisher learned the header tag, or signed without it because
+ * the header could not be fetched, lack it; this adds it for the heights that
+ * matter, without touching the corpus otherwise.
  *
  *   node scripts/backfill-header-tag.mjs <height> [height ...]            # dry run (default)
  *   node scripts/backfill-header-tag.mjs --publish <height> [height ...]  # sign and publish
+ *   node scripts/backfill-header-tag.mjs --from-missing [--publish]       # the publisher's header-missing list
  *
- * Heights may also be comma separated. The dry run reads the archive and the
+ * Heights may also be comma separated. More than MAX_WITHOUT_FLAG heights
+ * need --many as well (see below). The dry run reads the archives and the
  * Bitcoin API, signs in memory, prints each event, and writes and sends nothing.
  *
  * For each height:
  *   1. take the last signing of that height from the archive; it must be ours
  *      (the loaded key's pubkey), kind 321, intact, and have no header tag yet;
- *   2. ask the Bitcoin API (NTH_BITCOIN_API_BASE_URL, the publisher's own
- *      source) for the block hash at that height, which must equal the
- *      anchor's H, and for the header, which must hash to H and agree with the
- *      anchor's M and P;
- *   3. build the same kind, content and tags, with the header tag where the
- *      publisher puts it (right after B), and a fresh created_at; sign it;
- *   4. (--publish) append it to archive/backfill-header.<role>.ndjson BEFORE
- *      sending, then publish to the primary relay and every mirror, each
- *      waiting for OK true.
+ *   2. if this script already signed a copy (archive/backfill-header.<role>.ndjson)
+ *      that is intact and whose header hashes to the anchor's H, resend that
+ *      copy as it is: no Bitcoin API call, so a rerun works during an outage;
+ *   3. otherwise ask the Bitcoin API (NTH_BITCOIN_API_BASE_URL, the publisher's
+ *      own source) for the block hash at that height, which must equal H, and
+ *      for the header, which must hash to H and agree with M and P (C on a
+ *      legacy anchor without M); build the same kind, content and tags, with
+ *      the header right after B, and created_at = the original's + 1; sign;
+ *   4. (--publish) append it to the backfill archive BEFORE sending, then
+ *      publish to the primary relay and every mirror, each waiting for OK true.
  *
- * Sign once: a height that already has a signed copy in the backfill archive
- * (same H, valid signature) reuses that event instead of signing again, so a
- * rerun after a refusal or a crash resends the same id and the relays dedupe
- * it. That is what keeps each height at exactly one extra anchor.
+ * created_at = original + 1, never "now": the copy sorts beside its original,
+ * so it never poses as the newest anchor. Readers that look at "the newest
+ * anchors" to find the tip (ONOSENDAI's discoverTip reads the newest 20, the
+ * region gate's highestAnchored the newest 64) are not fooled by a backfill,
+ * and the event id is the same on every run.
+ *
+ * The --many cap exists anyway, for whatever reader is not careful: a backfill
+ * of a handful of retarget boundaries is the normal case, and a long list
+ * should be a deliberate act.
+ *
+ * Exclusion: --publish holds the "backfill-header" abstract-socket lock for
+ * NTH_HOME, so two publishing runs can never both sign.
  *
  * Exits 1 if any height could not be prepared or any relay refused, so a
  * failed run is never mistaken for a quiet one. Rerunning is safe.
@@ -60,14 +72,26 @@ const { loadPrivateKey, privateKeyPath } = await import(`${DIST}/lib/privateKey.
 const { createBitcoinApi, getBitcoinApiBaseUrlFromEnv } = await import(`${DIST}/lib/bitcoin.js`);
 const { HEADER_TAG, headerFields, headerMismatch } = await import(`${DIST}/lib/blockHeader.js`);
 const { parseMirrorRelays } = await import(`${DIST}/lib/mirrors.js`);
+const { acquireToolLock, rolePaths } = await import(`${DIST}/lib/runtime.js`);
+
+const MAX_WITHOUT_FLAG = 5;
 
 // ---- arguments ----
 
+const FLAGS = new Set(['--publish', '--dry-run', '--many', '--from-missing']);
 const args = process.argv.slice(2);
 const PUBLISH = args.includes('--publish');
+const MANY = args.includes('--many');
+const FROM_MISSING = args.includes('--from-missing');
+const USAGE = 'Usage: node scripts/backfill-header-tag.mjs [--publish] [--many] [--from-missing] [height ...]';
+
 const heights = [];
 for (const arg of args) {
-  if (arg === '--publish' || arg === '--dry-run') continue;
+  if (FLAGS.has(arg)) continue;
+  if (arg.startsWith('--')) {
+    console.error(`Unknown flag ${arg}\n${USAGE}`);
+    process.exit(1);
+  }
   for (const part of arg.split(',')) {
     if (!part.trim()) continue;
     if (!/^\d+$/.test(part.trim())) {
@@ -77,11 +101,6 @@ for (const arg of args) {
     heights.push(Number(part.trim()));
   }
 }
-const wanted = [...new Set(heights)].sort((a, b) => a - b);
-if (wanted.length === 0) {
-  console.error('Usage: node scripts/backfill-header-tag.mjs [--publish] <height> [height ...]');
-  process.exit(1);
-}
 
 // ---- environment ----
 
@@ -89,9 +108,39 @@ const HOME = process.env.NTH_HOME || '/data/projects/nth';
 const ROLE = process.env.NTH_ROLE || 'tip';
 const ARCHIVE = process.env.NTH_ARCHIVE || `${HOME}/archive/published.${ROLE}.ndjson`;
 const BACKFILL_ARCHIVE = process.env.NTH_HEADER_BACKFILL_ARCHIVE || `${HOME}/archive/backfill-header.${ROLE}.ndjson`;
+const MISSING = rolePaths(ROLE).headerMissing;
 const RELAY = (process.env.NTH_RELAY || 'wss://cyberspace.nostr1.com').trim();
 const MIRRORS = parseMirrorRelays(process.env.NTH_MIRROR_RELAYS, RELAY);
 const bitcoin = createBitcoinApi(getBitcoinApiBaseUrlFromEnv());
+
+if (FROM_MISSING) {
+  if (!existsSync(MISSING)) {
+    console.error(`--from-missing: no header-missing file at ${MISSING}`);
+  } else {
+    const lines = createInterface({ input: createReadStream(MISSING, 'utf8'), crlfDelay: Infinity });
+    for await (const line of lines) {
+      try {
+        const h = JSON.parse(line).height;
+        if (Number.isSafeInteger(h) && h >= 0) heights.push(h);
+      } catch {
+        // a torn line is skipped; the anchor is still in the archive
+      }
+    }
+  }
+}
+
+const wanted = [...new Set(heights)].sort((a, b) => a - b);
+if (wanted.length === 0) {
+  console.error(FROM_MISSING ? 'Nothing to do: no heights given and none listed as missing.' : USAGE);
+  process.exit(FROM_MISSING ? 0 : 1);
+}
+if (wanted.length > MAX_WITHOUT_FLAG && !MANY) {
+  console.error(
+    `Refusing ${wanted.length} heights without --many (the limit is ${MAX_WITHOUT_FLAG}). ` +
+      'Each one is a second anchor on every relay; a long list should be deliberate.',
+  );
+  process.exit(1);
+}
 
 if (!existsSync(ARCHIVE)) {
   console.error(`No archive at ${ARCHIVE}`);
@@ -106,6 +155,17 @@ if (!keySource) {
 }
 const privateKey = keySource.key;
 const pubkey = getPublicKey(privateKey);
+
+// Before reading the backfill archive, so a second run cannot read it, sign,
+// and append alongside this one.
+if (PUBLISH) {
+  try {
+    await acquireToolLock('backfill-header');
+  } catch (err) {
+    console.error(`Another backfill-header run holds the lock for ${HOME}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
 
 const tagValue = (event, name) => event.tags?.find((t) => t[0] === name)?.[1] ?? null;
 const hasTag = (event, name) => (event.tags || []).some((t) => t[0] === name);
@@ -147,6 +207,16 @@ console.log(`Relays:   ${[RELAY, ...MIRRORS].join(', ')}`);
 console.log(`Pubkey:   ${pubkey}`);
 console.log(`Heights:  ${wanted.join(', ')}\n`);
 
+/** The header check against the original anchor's own H, M (or legacy C) and P. */
+function headerProblem(header, original) {
+  return headerMismatch(header, {
+    blockHash: tagValue(original, 'H'),
+    // Legacy anchors (DECK-0001 §2.2) have no M: their C is the merkle root.
+    merkleRoot: tagValue(original, 'M') ?? tagValue(original, 'C'),
+    prevBlockHash: tagValue(original, 'P'),
+  });
+}
+
 /** Build (or reuse) the header-carrying copy for one height. Throws with a reason. */
 async function prepare(height) {
   const original = archived.get(height);
@@ -157,7 +227,21 @@ async function prepare(height) {
   if (hasTag(original, HEADER_TAG)) throw new Error(`archived event ${original.id} already carries a header tag; nothing to add`);
 
   const H = tagValue(original, 'H');
-  if (!H) throw new Error(`archived event ${original.id} has no H tag`);
+  if (!H || !/^[0-9a-f]{64}$/.test(H)) throw new Error(`archived event ${original.id} has no usable H tag`);
+
+  // A copy this script already signed is checked locally and resent as is:
+  // its header hashing to H is the whole proof, and no API is needed for it.
+  const prior = alreadySigned.get(height);
+  if (
+    prior &&
+    prior.pubkey === pubkey &&
+    intact(prior) &&
+    tagValue(prior, 'H') === H &&
+    tagValue(prior, HEADER_TAG) !== null &&
+    headerProblem(tagValue(prior, HEADER_TAG), original) === null
+  ) {
+    return { event: prior, original, header: tagValue(prior, HEADER_TAG), reused: true };
+  }
 
   // The chain must still have this block at this height.
   const chainHash = await bitcoin.getBlockHashByHeight(height);
@@ -166,16 +250,8 @@ async function prepare(height) {
   }
 
   const header = (await bitcoin.getBlockHeader(H, { heightHint: height })).toLowerCase();
-  // Legacy anchors (DECK-0001 §2.2) have no M: their C is the merkle root.
-  const merkleRoot = tagValue(original, 'M') ?? tagValue(original, 'C');
-  const problem = headerMismatch(header, { blockHash: H, merkleRoot, prevBlockHash: tagValue(original, 'P') });
+  const problem = headerProblem(header, original);
   if (problem) throw new Error(`the Bitcoin API's header for ${H} does not match the anchor (${problem})`);
-
-  // Sign once: reuse a copy this script already signed for this height.
-  const prior = alreadySigned.get(height);
-  if (prior && prior.pubkey === pubkey && intact(prior) && tagValue(prior, 'H') === H && tagValue(prior, HEADER_TAG) === header) {
-    return { event: prior, original, header, reused: true };
-  }
 
   const tags = [];
   for (const tag of original.tags) {
@@ -185,7 +261,7 @@ async function prepare(height) {
   const unsigned = {
     kind: original.kind,
     pubkey,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: original.created_at + 1,
     tags,
     content: original.content,
   };
@@ -202,7 +278,7 @@ for (const height of wanted) {
     prepared.push({ height, ...p });
     const f = headerFields(p.header);
     console.log(
-      `${height}: copy of ${p.original.id}${p.reused ? ' (REUSING the copy already signed; not re-signing)' : ''}\n` +
+      `${height}: copy of ${p.original.id}${p.reused ? ' (REUSING the copy already signed; no API call, not re-signing)' : ''}\n` +
         `  header time ${f.time} (${new Date(f.time * 1000).toISOString()}), bits 0x${f.bits.toString(16).padStart(8, '0')}, hashes to H ${tagValue(p.event, 'H')}`,
     );
     console.log(JSON.stringify(p.event, null, 2));
@@ -215,16 +291,14 @@ for (const height of wanted) {
 
 if (!PUBLISH) {
   console.log(`Dry run: ${prepared.length} prepared, ${failures} skipped. Nothing was written or sent.`);
-  if (prepared.some((p) => !p.reused)) {
-    console.log('A --publish run signs again with a fresh created_at, so its ids will differ from the ones printed here.');
-  }
+  console.log('created_at is the original\'s + 1, so a --publish run produces these same ids (the signatures differ).');
   process.exit(failures > 0 ? 1 : 0);
 }
 
 // ---- publish ----
 
 // Archive before sending, as the publisher does: the signed copy must survive a
-// relay that drops it, and it is what makes a rerun reuse this id.
+// relay that drops it, and it is what lets a rerun skip the API.
 for (const p of prepared) {
   if (p.reused) continue;
   mkdirSync(dirname(BACKFILL_ARCHIVE), { recursive: true });

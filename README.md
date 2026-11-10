@@ -70,10 +70,12 @@ Publishes kind `321` (DECK-0001 §2) with tags:
 - `P`: previous block hash (or 64 zeros for height 0)
 - `N`: next block hash
 - `B`: block height
-- `header`: the raw 80-byte block header, 160 lowercase hex. Before signing, the publisher checks that its sha256d, byte-reversed, equals `H` (and that its merkle root and previous hash equal `M` and `P`), and refuses to sign otherwise. Readers take block time and bits only from a header that passes the same check.
+- `header`: the raw 80-byte block header, 160 lowercase hex. Before signing, the publisher checks that its sha256d, byte-reversed, equals `H` (and that its merkle root and previous hash equal `M` and `P`), and refuses to sign otherwise. A mismatch never falls back. A header that cannot be FETCHED (network error, timeout, HTTP status, malformed body) is retried; after `NTH_HEADER_MAX_ATTEMPTS` failures (default 5) or `NTH_HEADER_MAX_WAIT_MS` since the first (default 600000), whichever comes first, the anchor is signed without the tag and the height goes to `state/<role>.header-missing.ndjson`. Readers take block time and bits only from a header that passes the same check.
 - `net`: `mainnet`
 
-`scripts/backfill-header-tag.mjs <height> [...]` prints (dry run, the default) or with `--publish` signs and publishes one extra anchor per height: the archived anchor plus the `header` tag. It signs each height once (`archive/backfill-header.<role>.ndjson`), so a rerun resends the same event.
+`scripts/backfill-header-tag.mjs <height> [...]` prints (dry run, the default) or with `--publish` signs and publishes one extra anchor per height: the archived anchor plus the `header` tag, with `created_at` = the original's + 1 so it never poses as the newest anchor. `--from-missing` adds the heights in `state/<role>.header-missing.ndjson`; more than 5 heights need `--many`. It signs each height once (`archive/backfill-header.<role>.ndjson`) and a rerun resends that copy without calling the Bitcoin API. `--publish` holds a `backfill-header` lock so two runs cannot both sign.
+
+Every Bitcoin API request times out after `NTH_BITCOIN_API_TIMEOUT_MS` (default 15000) and is retried like any other network error.
 
 ## Local state
 `.nth/` contains local runtime state (generated private key, error logs) and is ignored by git.
@@ -82,6 +84,7 @@ Under `NTH_HOME` (default `/data/projects/nth`):
 - `state/<role>.json`: the resume point, advanced only after the primary's OK.
 - `state/<role>.pending.json`: the anchor signed for the height in progress. Each height is signed once; retries and restarts publish this same event again, so a relay only ever sees one event id per height. It is cleared once the height is past.
 - `state/<role>.mirror-missed.ndjson`: heights a mirror did not take.
+- `state/<role>.header-missing.ndjson`: heights signed without the `header` tag because it could not be fetched; `scripts/backfill-header-tag.mjs --from-missing` reads it.
 - `archive/published.<role>.ndjson`: every signed anchor, written once per signing.
 - `run/<role>.pid`: the worker pid. The single-instance lock itself is a Linux abstract unix socket named from `NTH_HOME` and the role, which the kernel grants to exactly one process and releases when it dies.
 
