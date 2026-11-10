@@ -318,6 +318,28 @@ class ConsensusTests(unittest.TestCase):
             chain.push(rec, now=NOW)
 
 
+class PinnedTests(unittest.TestCase):
+    """PINNED is a trust anchor: a typo would refuse the real line (or, if it
+    matched a forgery, accept one). These hold its shape. Each value was
+    cross-checked against an explorer before pinning (blockstream.info for the
+    2026-08-24 entries; 971,999 against two; 974,999 against blockstream.info
+    and mempool.space), and the same list is embedded in ONOSENDAI
+    src/lib/hyperspace/checkpoints.ts."""
+
+    def test_every_pin_is_genesis_or_a_checkpoint_height(self):
+        for height, block_hash in HH.PINNED.items():
+            self.assertTrue(height == 0 or height % HH.INTERVAL == HH.INTERVAL - 1, height)
+            self.assertTrue(HH._is_hex64(block_hash), height)
+        self.assertEqual(HH.PINNED[0], HH.GENESIS_HASH)
+
+    def test_holds_every_blob_end_and_the_head_blob_pins(self):
+        top = max(HH.PINNED)
+        for h in range(HH.BLOB_SIZE - 1, top + 1, HH.BLOB_SIZE):
+            self.assertIn(h, HH.PINNED)
+        self.assertEqual(HH.PINNED[971_999], "00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82")
+        self.assertEqual(HH.PINNED[974_999], "0000000000000000000034698d1530f1294ec6c2937e0e366df8f17a5b614376")
+
+
 REAL = Path(os.environ.get("HEADERS_DIR") or "/data/projects/nth/blobs")
 
 
