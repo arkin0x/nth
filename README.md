@@ -61,14 +61,19 @@ NTH_BITCOIN_API_BASE_URL=https://mempool.space/api
 ```
 
 ## Event format
-Publishes kind `321` with tags:
-- `C`: merkle root (32-byte / 64-hex)
+Publishes kind `321` (DECK-0001 §2) with tags:
+- `C`: stop coordinate (a port's merkle root, or a landfall coordinate derived from `H`)
+- `M`: merkle root (32-byte / 64-hex)
 - `X`, `Y`, `Z`: sector coordinates derived from `C`
 - `S`: `${X}-${Y}-${Z}`
 - `H`: block hash
 - `P`: previous block hash (or 64 zeros for height 0)
 - `N`: next block hash
 - `B`: block height
+- `header`: the raw 80-byte block header, 160 lowercase hex. Before signing, the publisher checks that its sha256d, byte-reversed, equals `H` (and that its merkle root and previous hash equal `M` and `P`), and refuses to sign otherwise. Readers take block time and bits only from a header that passes the same check.
+- `net`: `mainnet`
+
+`scripts/backfill-header-tag.mjs <height> [...]` prints (dry run, the default) or with `--publish` signs and publishes one extra anchor per height: the archived anchor plus the `header` tag. It signs each height once (`archive/backfill-header.<role>.ndjson`), so a rerun resends the same event.
 
 ## Local state
 `.nth/` contains local runtime state (generated private key, error logs) and is ignored by git.

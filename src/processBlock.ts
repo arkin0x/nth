@@ -2,6 +2,7 @@ import type { Event, UnsignedEvent } from 'nostr-tools';
 import { getEventHash, getPublicKey, getSignature, validateEvent, verifySignature } from 'nostr-tools';
 
 import type { BitcoinApi } from './lib/bitcoin.js';
+import { HEADER_TAG, headerMismatch } from './lib/blockHeader.js';
 import { coordHexToSector, sectorToTags } from './lib/cyberspace.js';
 import { landfallCoordHex, planeOfMerkleRoot } from './lib/landfall.js';
 import type { PendingAnchor } from './lib/runtime.js';
@@ -38,6 +39,20 @@ export async function signAnchor(opts: {
 
   const merkleRoot = lc(block.merkleRoot);
 
+  // The raw header lets a reader prove the block's time and bits without
+  // trusting this publisher: sha256d(header), byte-reversed, must equal H.
+  // Check it here first, so a wrong header from the API is never signed. A
+  // mismatch throws into the caller's retry loop, like any other API failure.
+  const header = lc(await bitcoin.getBlockHeader(blockHash, { heightHint: blockHeight }));
+  const headerProblem = headerMismatch(header, {
+    blockHash: lc(blockHash),
+    merkleRoot,
+    prevBlockHash: block.prevBlockHash ? lc(block.prevBlockHash) : null,
+  });
+  if (headerProblem) {
+    throw new Error(`Refusing to sign block ${blockHeight}: the Bitcoin API's header does not match the block (${headerProblem})`);
+  }
+
   // DECK-0001 v3 §1: the merkle root's plane bit decides the stop kind.
   // Plane 1 is a port in ideaspace at the root coordinate; plane 0 is a
   // landfall on the WGS84 surface at a point the BLOCK HASH picks (the hash
@@ -60,6 +75,9 @@ export async function signAnchor(opts: {
       ['P', block.prevBlockHash ? lc(block.prevBlockHash) : '0'.repeat(64)],
       ['N', lc(nextBlockHash)],
       ['B', blockHeight.toString()],
+      // Optional in DECK-0001: the raw 80-byte header, 160 lowercase hex,
+      // verified above to hash to H. Readers take block time only from here.
+      [HEADER_TAG, header],
       // DECK-0001: anchor events SHOULD declare the Bitcoin network they bind to.
       // Absent this, verifiers must assume mainnet.
       ['net', network],

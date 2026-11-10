@@ -26,6 +26,8 @@ export type BitcoinApi = {
     merkleRoot: string;
     prevBlockHash: string | null;
   }>;
+  /** The raw 80-byte block header as 160 lowercase hex (Esplora GET /block/:hash/header). */
+  getBlockHeader(hash: string, opts?: { heightHint?: number }): Promise<string>;
 };
 
 export function createBitcoinApi(baseUrl: string): BitcoinApi {
@@ -273,6 +275,39 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
       }
 
       return { hash: blockHash, height, merkleRoot, prevBlockHash };
+    },
+
+    async getBlockHeader(hash: string, opts?: { heightHint?: number }): Promise<string> {
+      const url = `${normalizedBaseUrl}/block/${hash}/header`;
+      let status: number;
+      let data: string;
+
+      try {
+        ({ status, data } = await getText(url));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logBitcoinApiError({ op: 'block-header', url, height: opts?.heightHint, hash, message: `Request failed: ${message}` });
+        throw err;
+      }
+
+      if (status < 200 || status >= 300 || !/^[0-9a-fA-F]{160}$/.test(data)) {
+        logBitcoinApiError({
+          op: 'block-header',
+          url,
+          status,
+          height: opts?.heightHint,
+          hash,
+          message: `Unexpected response for block/${hash}/header (expected 160-hex)`,
+          bodySnippet: data,
+        });
+        throw new BitcoinApiError(`Bitcoin API returned HTTP ${status} or a malformed header for block/${hash}/header`, {
+          url,
+          status,
+          body: data,
+        });
+      }
+
+      return data.toLowerCase();
     },
   };
 }
