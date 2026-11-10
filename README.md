@@ -9,10 +9,16 @@ self-verifying (SPV linkage + proof of work + pinned checkpoints); the
 manifest's sha256 entries are transport integrity only.
 
 Finalized blobs (50,000 records) are never rewritten. The last blob, the
-head, may be partial: it ends exactly on a checkpoint height (h % 1000 == 999,
-at least 100 blocks below the tip when it was cut) and only ever grows by
+head, may be partial: it ends on a checkpoint height (h % 1000 == 999, at
+least 100 blocks below the tip when it was cut) and only ever grows by
 appending records, so its old bytes are always a prefix of the new file. Past
 a 50,000 boundary it is finished and the next ordinal becomes the head.
+
+One exception: on 2026-11-10 the head was grown by hand to 975,226 (100
+blocks below that day's tip), off the 1,000 grid, so that header times exist
+for 972,000 onward (kind 321 anchors carry a `header` tag only from 975,256).
+The tool takes it from there: its next checkpoint height is 975,999, and it
+appends to the head as usual.
 
 The head is grown by `scripts/headers_head.py` on the master branch (from
 nth#3), which a weekly workflow (`.github/workflows/headers-head.yml` on
