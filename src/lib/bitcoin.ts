@@ -26,7 +26,21 @@ export type BitcoinApi = {
     merkleRoot: string;
     prevBlockHash: string | null;
   }>;
+  /** The raw 80-byte block header as 160 lowercase hex (Esplora GET /block/:hash/header). */
+  getBlockHeader(hash: string, opts?: { heightHint?: number }): Promise<string>;
 };
+
+/**
+ * How long one Bitcoin API request may take before it fails, from
+ * NTH_BITCOIN_API_TIMEOUT_MS (default 15 s). Without it a request that never
+ * answers hangs the worker forever; with it the timeout throws like any other
+ * network error, into the caller's retry loop. Read per request, so a value
+ * loaded by dotenv after import still applies.
+ */
+export function bitcoinApiTimeoutMs(): number {
+  const raw = Number.parseInt((process.env.NTH_BITCOIN_API_TIMEOUT_MS || '').trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+}
 
 export function createBitcoinApi(baseUrl: string): BitcoinApi {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
@@ -36,6 +50,10 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
       const res = await axios.get(url, {
         responseType: 'text',
         validateStatus: () => true,
+        timeout: bitcoinApiTimeoutMs(),
+        // A hard backstop a second later, in case a phase the axios timer
+        // does not cover (a stalled socket setup) ever hangs.
+        signal: AbortSignal.timeout(bitcoinApiTimeoutMs() + 1_000),
       });
 
       return { status: res.status, data: String(res.data ?? '').trim() };
@@ -51,6 +69,10 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
         responseType: 'text',
         transformResponse: (r) => r,
         validateStatus: () => true,
+        timeout: bitcoinApiTimeoutMs(),
+        // A hard backstop a second later, in case a phase the axios timer
+        // does not cover (a stalled socket setup) ever hangs.
+        signal: AbortSignal.timeout(bitcoinApiTimeoutMs() + 1_000),
       });
 
       const rawBody = String(res.data ?? '');
@@ -273,6 +295,39 @@ export function createBitcoinApi(baseUrl: string): BitcoinApi {
       }
 
       return { hash: blockHash, height, merkleRoot, prevBlockHash };
+    },
+
+    async getBlockHeader(hash: string, opts?: { heightHint?: number }): Promise<string> {
+      const url = `${normalizedBaseUrl}/block/${hash}/header`;
+      let status: number;
+      let data: string;
+
+      try {
+        ({ status, data } = await getText(url));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logBitcoinApiError({ op: 'block-header', url, height: opts?.heightHint, hash, message: `Request failed: ${message}` });
+        throw err;
+      }
+
+      if (status < 200 || status >= 300 || !/^[0-9a-fA-F]{160}$/.test(data)) {
+        logBitcoinApiError({
+          op: 'block-header',
+          url,
+          status,
+          height: opts?.heightHint,
+          hash,
+          message: `Unexpected response for block/${hash}/header (expected 160-hex)`,
+          bodySnippet: data,
+        });
+        throw new BitcoinApiError(`Bitcoin API returned HTTP ${status} or a malformed header for block/${hash}/header`, {
+          url,
+          status,
+          body: data,
+        });
+      }
+
+      return data.toLowerCase();
     },
   };
 }

@@ -2,6 +2,7 @@ import type { Event, UnsignedEvent } from 'nostr-tools';
 import { getEventHash, getPublicKey, getSignature, validateEvent, verifySignature } from 'nostr-tools';
 
 import type { BitcoinApi } from './lib/bitcoin.js';
+import { HEADER_TAG, headerMismatch, type HeaderFallback } from './lib/blockHeader.js';
 import { coordHexToSector, sectorToTags } from './lib/cyberspace.js';
 import { landfallCoordHex, planeOfMerkleRoot } from './lib/landfall.js';
 import type { PendingAnchor } from './lib/runtime.js';
@@ -30,6 +31,11 @@ export async function signAnchor(opts: {
   bitcoin: BitcoinApi;
   privateKey: string;
   network?: string;
+  /**
+   * When a header cannot be fetched, whether to give up and sign without it.
+   * Absent, a fetch failure always throws (the caller retries).
+   */
+  headerFallback?: HeaderFallback;
 }): Promise<Event> {
   const { blockHeight, blockHash, nextBlockHash, bitcoin, privateKey } = opts;
   const network = opts.network || 'mainnet';
@@ -37,6 +43,39 @@ export async function signAnchor(opts: {
   const block = await bitcoin.getBlockByHash(blockHash, { heightHint: blockHeight });
 
   const merkleRoot = lc(block.merkleRoot);
+
+  // The raw header lets a reader prove the block's time and bits without
+  // trusting this publisher: sha256d(header), byte-reversed, must equal H.
+  // Check it here first, so a wrong header from the API is never signed. A
+  // mismatch throws into the caller's retry loop, like any other API failure.
+  //
+  // A FETCH failure (network, timeout, HTTP status, malformed body) is
+  // retried; after the fallback's limit the anchor is signed without the tag
+  // and the height is recorded for the backfill script, because the tag is
+  // optional and the line must not stall on it. A MISMATCH never falls back.
+  let header: string | null = null;
+  try {
+    header = lc(await bitcoin.getBlockHeader(blockHash, { heightHint: blockHeight }));
+  } catch (error) {
+    if (!opts.headerFallback?.giveUp(blockHeight, lc(blockHash), error)) throw error;
+    console.error(
+      `Signing block ${blockHeight} WITHOUT the header tag: the header could not be fetched ` +
+        `(${error instanceof Error ? error.message : String(error)}); recorded for the backfill script`,
+    );
+  }
+  if (header !== null) {
+    const headerProblem = headerMismatch(header, {
+      blockHash: lc(blockHash),
+      merkleRoot,
+      prevBlockHash: block.prevBlockHash ? lc(block.prevBlockHash) : null,
+    });
+    if (headerProblem) {
+      // A wrong header poisons the fallback for this height: later fetch
+      // failures here must keep refusing, never sign without the tag.
+      opts.headerFallback?.mismatched(blockHeight);
+      throw new Error(`Refusing to sign block ${blockHeight}: the Bitcoin API's header does not match the block (${headerProblem})`);
+    }
+  }
 
   // DECK-0001 v3 §1: the merkle root's plane bit decides the stop kind.
   // Plane 1 is a port in ideaspace at the root coordinate; plane 0 is a
@@ -60,6 +99,9 @@ export async function signAnchor(opts: {
       ['P', block.prevBlockHash ? lc(block.prevBlockHash) : '0'.repeat(64)],
       ['N', lc(nextBlockHash)],
       ['B', blockHeight.toString()],
+      // Optional in DECK-0001: the raw 80-byte header, 160 lowercase hex,
+      // verified above to hash to H. Readers take block time only from here.
+      ...(header !== null ? [[HEADER_TAG, header]] : []),
       // DECK-0001: anchor events SHOULD declare the Bitcoin network they bind to.
       // Absent this, verifiers must assume mainnet.
       ['net', network],
@@ -138,6 +180,7 @@ export async function processBlock(opts: {
   privateKey: string;
   network?: string;
   store: PendingStore;
+  headerFallback?: HeaderFallback;
 }): Promise<Event> {
   const { blockHeight, blockHash, nextBlockHash, publish, privateKey, store } = opts;
   const pubkey = getPublicKey(privateKey);

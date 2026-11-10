@@ -19,6 +19,8 @@ import { dirname, resolve } from 'path';
 
 import type { Event } from 'nostr-tools';
 
+import type { HeaderMissing } from './blockHeader.js';
+
 /**
  * Runtime home for persistent state. Defaults to the agent-writable persistent
  * volume; `/data` is the only path on this host that survives a reboot.
@@ -35,6 +37,8 @@ export type RolePaths = {
   archive: string;
   /** One line per height a mirror relay did not take, for exact catch-up later. */
   mirrorMissed: string;
+  /** One line per height signed without the header tag (fetch failed), for the backfill script. */
+  headerMissing: string;
 };
 
 export function rolePaths(role: Role): RolePaths {
@@ -44,6 +48,7 @@ export function rolePaths(role: Role): RolePaths {
     lock: `${NTH_HOME}/run/${role}.pid`,
     archive: `${NTH_HOME}/archive/published.${role}.ndjson`,
     mirrorMissed: `${NTH_HOME}/state/${role}.mirror-missed.ndjson`,
+    headerMissing: `${NTH_HOME}/state/${role}.header-missing.ndjson`,
   };
 }
 
@@ -131,14 +136,14 @@ function processAlive(pid: number, expectCmdlineSubstring?: string): boolean {
  * through together, and no stale lock to reclaim. The name is derived from
  * NTH_HOME and the role, so separate runtime homes never contend.
  */
-function lockSocketName(role: Role): string {
+function lockSocketName(role: string): string {
   const digest = createHash('sha256').update(`${NTH_HOME}\0${role}`).digest('hex').slice(0, 32);
   return `\0nth-lock-${digest}`;
 }
 
 let heldLockServer: Server | null = null;
 
-function bindLockSocket(role: Role): Promise<Server> {
+function bindLockSocket(role: string): Promise<Server> {
   return new Promise<Server>((resolvePromise, reject) => {
     const server = createServer((socket) => socket.destroy());
     server.once('error', (error: NodeJS.ErrnoException) => {
@@ -217,6 +222,17 @@ export async function acquireLock(role: Role): Promise<void> {
       process.exit(0);
     });
   }
+}
+
+/**
+ * Take the abstract-socket lock under a name of its own, for a one-shot tool
+ * (scripts/backfill-header-tag.mjs uses "backfill-header") that must never
+ * run twice at once against one NTH_HOME. Throws if another process holds it.
+ * The kernel releases it when this process exits, however it exits.
+ */
+export async function acquireToolLock(name: string): Promise<void> {
+  const server = await bindLockSocket(name);
+  server.unref();
 }
 
 /** For tests: true while this process holds the instance lock. */
@@ -342,6 +358,20 @@ export function appendMirrorMiss(role: Role, miss: MirrorMiss): void {
     appendFileSync(mirrorMissed, `${JSON.stringify({ at: Math.floor(Date.now() / 1000), ...miss })}\n`, 'utf8');
   } catch (error) {
     console.error(`Could not record mirror miss for block ${miss.height} on ${miss.relay}:`, error);
+  }
+}
+
+/**
+ * Record a height signed without the header tag. Never throws: the anchor is
+ * signed either way, and this line only feeds scripts/backfill-header-tag.mjs.
+ */
+export function appendHeaderMissing(role: Role, missing: HeaderMissing): void {
+  try {
+    const { headerMissing } = rolePaths(role);
+    ensureDir(headerMissing);
+    appendFileSync(headerMissing, `${JSON.stringify({ at: Math.floor(Date.now() / 1000), ...missing })}\n`, 'utf8');
+  } catch (error) {
+    console.error(`Could not record the missing header for block ${missing.height}:`, error);
   }
 }
 

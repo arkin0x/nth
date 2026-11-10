@@ -11,6 +11,7 @@ import { connectPublisher } from './lib/publisher.js';
 import {
   acquireLock,
   appendArchiveOnce,
+  appendHeaderMissing,
   appendMirrorMiss,
   clearPending,
   readPending,
@@ -21,6 +22,7 @@ import {
   type Role,
 } from './lib/runtime.js';
 import { processBlock } from './processBlock.js';
+import { createHeaderFallback } from './lib/blockHeader.js';
 
 if (!global.WebSocket) {
   global.WebSocket = WebSocket as any;
@@ -180,6 +182,18 @@ async function main() {
   console.log(`Confirmation depth: ${confirmations}`);
   if (role === 'backfill') console.log(`Stop after height: ${stopAt}`);
 
+  // A header that cannot be fetched is retried; after this many failures, or
+  // this long since the first, the anchor is signed without it and the height
+  // goes to state/<role>.header-missing.ndjson for the backfill script.
+  const headerMaxAttempts = Math.max(1, parseIntEnv('NTH_HEADER_MAX_ATTEMPTS', 5));
+  const headerMaxWaitMs = parseIntEnv('NTH_HEADER_MAX_WAIT_MS', 600_000);
+  console.log(`Header fallback: after ${headerMaxAttempts} failed fetches or ${headerMaxWaitMs}ms at one height`);
+  const headerFallback = createHeaderFallback({
+    maxAttempts: headerMaxAttempts,
+    maxWaitMs: headerMaxWaitMs,
+    onMissing: (missing) => appendHeaderMissing(role, missing),
+  });
+
   let blockHeight = startHeight;
   let currentHash: string | null = null;
   let nextHash: string | null = null;
@@ -240,6 +254,7 @@ async function main() {
         publish: publisher.publish,
         privateKey,
         network,
+        headerFallback,
         store: {
           read: () => readPending(role),
           write: (anchor) => writePending(role, anchor),

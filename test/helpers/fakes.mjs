@@ -150,12 +150,44 @@ export async function startRelay({ requireAuth = false, policy = null, port = 0 
 }
 
 const h64 = (s) => createHash('sha256').update(s).digest('hex');
-export const blockHash = (h) => h64(`block:${h}`);
+const sha256d = (b) => createHash('sha256').update(createHash('sha256').update(b).digest()).digest();
 const merkle = (h) => h64(`merkle:${h}`);
 
-/** Fake Esplora: blocks 0..tip exist. */
-export async function startEsplora({ tip }) {
-  const api = { tip, url: '' };
+/**
+ * A fake chain of real 80-byte headers: each block's hash is the sha256d of
+ * its header (byte-reversed into display hex) and each header links to the
+ * previous block's hash, so the publisher's header check runs for real. No
+ * proof of work: nothing in the publisher checks bits against the hash.
+ */
+const fakeChain = [];
+function fakeBlock(h) {
+  while (fakeChain.length <= h) {
+    const n = fakeChain.length;
+    const header = Buffer.alloc(80);
+    header.writeInt32LE(0x20000000, 0);
+    if (n > 0) Buffer.from(fakeChain[n - 1].hash, 'hex').reverse().copy(header, 4);
+    Buffer.from(merkle(n), 'hex').reverse().copy(header, 36);
+    header.writeUInt32LE(1700000000 + n * 600, 68);
+    header.writeUInt32LE(0x1d00ffff, 72);
+    header.writeUInt32LE(n, 76);
+    fakeChain.push({ header: header.toString('hex'), hash: Buffer.from(sha256d(header)).reverse().toString('hex') });
+  }
+  return fakeChain[h];
+}
+export const blockHash = (h) => fakeBlock(h).hash;
+export const blockHeader = (h) => fakeBlock(h).header;
+
+/** Returned by a fake Esplora `header` override: never answer the request. */
+export const HANG = Symbol('hang');
+
+/**
+ * Fake Esplora: blocks 0..tip exist. `header(height, realHeaderHex)` may
+ * override what GET /block/:hash/header serves, to play a lying or failing
+ * API: return a string (served with 200), `{ status, body }`, or HANG.
+ * `headerRequests` counts the header requests per height.
+ */
+export async function startEsplora({ tip, header = (_h, real) => real }) {
+  const api = { tip, url: '', headerRequests: new Map() };
   const server = createServer((req, res) => {
     const send = (status, body, type = 'text/plain') => {
       res.writeHead(status, { 'content-type': type });
@@ -166,6 +198,17 @@ export async function startEsplora({ tip }) {
     if ((m = req.url.match(/^\/block-height\/(\d+)$/))) {
       const h = Number(m[1]);
       return h <= api.tip ? send(200, blockHash(h)) : send(404, 'Block not found');
+    }
+    if ((m = req.url.match(/^\/block\/([0-9a-f]{64})\/header$/))) {
+      for (let h = 0; h <= api.tip; h++) {
+        if (blockHash(h) === m[1]) {
+          api.headerRequests.set(h, (api.headerRequests.get(h) || 0) + 1);
+          const r = header(h, blockHeader(h));
+          if (r === HANG) return; // the socket stays open, unanswered
+          return typeof r === 'string' ? send(200, r) : send(r.status, r.body);
+        }
+      }
+      return send(404, 'Block not found');
     }
     if ((m = req.url.match(/^\/block\/([0-9a-f]{64})$/))) {
       for (let h = 0; h <= api.tip; h++) {
@@ -188,7 +231,11 @@ export async function startEsplora({ tip }) {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   api.url = `http://127.0.0.1:${server.address().port}`;
-  api.close = () => new Promise((r) => server.close(r));
+  api.close = () =>
+    new Promise((r) => {
+      server.close(r);
+      server.closeAllConnections(); // hung (HANG) requests would hold close() forever
+    });
   return api;
 }
 
