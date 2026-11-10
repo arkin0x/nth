@@ -17,7 +17,7 @@ Nothing is believed because a server said it. The tool:
      bits equal to the exact retarget result at every 2016th block and
      unchanged elsewhere, time above the median of the previous eleven, and
      the BIP34/66/65 minimum versions;
-     every height in PINNED (genesis and the 20 checkpoints ONOSENDAI,
+     every height in PINNED (genesis and the checkpoints ONOSENDAI,
      cyberspace-mcp and hosaka-core embed) and every manifest checkpoint must match;
   2. fetches only the new headers from one Esplora source and puts each
      through the same rules, also requiring the source's own id and
@@ -57,11 +57,14 @@ MIN_DEPTH = 100
 
 GENESIS_HASH = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 
-#: Genesis and the 20 checkpoints embedded in ONOSENDAI
+#: Genesis and the checkpoints embedded in ONOSENDAI
 #: src/lib/hyperspace/checkpoints.ts, cyberspace-mcp src/hyperspace/checkpoints.ts
 #: and hosaka-core src/hosaka_core/headers.py (49,999 to 949,999 pinned
 #: 2026-08-24, 971,999 with headers-v1 #4 on 2026-10-23; each confirmed against
-#: blockstream.info). A manifest that disagrees with any of them is refused.
+#: blockstream.info). 974,999 was pinned with headers-v1 #10 on 2026-11-10
+#: (ONOSENDAI #658; confirmed against blockstream.info and mempool.space);
+#: cyberspace-mcp and hosaka-core still end at 971,999. A manifest that
+#: disagrees with any of them is refused, and so is a line that ends below one.
 PINNED: Dict[int, str] = {
     0: GENESIS_HASH,
     49999: "000000000845517b31c6820d83f25cff46429bf136a7515fe504116427e60f8e",
@@ -84,6 +87,7 @@ PINNED: Dict[int, str] = {
     899999: "0000000000000000000196400396be46d0816dc462df4c3450972f589f4d7d24",
     949999: "00000000000000000000df842728edc58cf64288ca21433257700f3d5b45f286",
     971999: "00000000000000000000d5c8611c63c98822c10b9ff61cec2d728429a2fd2d82",
+    974999: "0000000000000000000034698d1530f1294ec6c2937e0e366df8f17a5b614376",
 }
 
 DEFAULT_SOURCE = "https://mempool.space/api"
