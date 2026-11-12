@@ -297,6 +297,9 @@ export function startWorker({ home, relay, mirrors = [], esplora, privateKey, en
       NTH_BITCOIN_API_ERROR_LOG: join(home, 'bitcoin_api_errors.jsonl'),
       NTH_PRIVATE_KEY: privateKey,
       NTH_CONFIRMATIONS: '1',
+      // The fake chains are only a few blocks tall, so the tests run below the
+      // production floor of 6 on purpose (see src/lib/confirmations.ts).
+      NTH_ALLOW_SHALLOW_CONFIRMATIONS: '1',
       NTH_PUBLISH_DELAY_MS: '5',
       NTH_NOT_MINED_DELAY_MS: '100',
       NTH_ERROR_BACKOFF_BASE_MS: '30',

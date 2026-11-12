@@ -40,6 +40,8 @@ If no key is provided, a new key is generated and written to:
 - Mirror tuning (rarely needed): `NTH_MIRROR_MIN_INTERVAL_MS` (default `1000`, the gap between two publishes to one mirror), `NTH_MIRROR_RETRY_BASE_MS` / `NTH_MIRROR_RETRY_MAX_MS` (default `5000` / `300000`, reconnect and retry backoff), `NTH_MIRROR_MAX_ATTEMPTS` (default `5`, for rate-limited or unanswered publishes), `NTH_MIRROR_QUEUE_MAX` (default `10000`), `NTH_MIRROR_OK_TIMEOUT_MS`, `NTH_MIRROR_CONNECT_TIMEOUT_MS` (default `15000`), `NTH_MIRROR_AUTH_WAIT_MS` (default `5000`).
 - `NTH_BITCOIN_API_BASE_URL` / `NTH_BITCOIN_API_BASE` (default: `https://mempool.space/api`)
 - `NTH_START_HEIGHT` (override start height; otherwise resumes from last published height + 1)
+- `NTH_CONFIRMATIONS` (default: `6`, minimum: `6`): publish block h only once the chain tip is at least this far above it. **Do not lower it below 6.** ONOSENDAI's Seeds clock reads NTH's newest published anchor as the DECK-0008 section 4.1 clock height ("best chain tip minus 6"), so a shallower depth would let seeds read blocks that can still be reorged away, and blooms could differ between clients after a reorg. The publisher refuses to start with a value below 6.
+- `NTH_ALLOW_SHALLOW_CONFIRMATIONS` (tests only): set to exactly `1` to let `NTH_CONFIRMATIONS` go below 6. It prints a loud warning at startup. The test suite needs it for its few-block fake chains; never set it on a publisher whose anchors reach a real relay.
 - `NTH_PUBLISH_DELAY_MS` (default: `200`)
 - `NTH_NOT_MINED_DELAY_MS` (default: `300000`)
 - `NTH_ERROR_BACKOFF_BASE_MS` (default: `1000`)
@@ -58,6 +60,11 @@ NTH_BITCOIN_API_BASE_URL=https://mempool.space/api
 
 # Optional start height override
 # NTH_START_HEIGHT=0
+
+# Confirmation depth. 6 is the default AND the minimum: ONOSENDAI's Seeds
+# clock (DECK-0008 section 4.1, "best chain tip minus 6") depends on it.
+# The publisher refuses to start below 6.
+NTH_CONFIRMATIONS=6
 ```
 
 ## Event format

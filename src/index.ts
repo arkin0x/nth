@@ -23,6 +23,7 @@ import {
 } from './lib/runtime.js';
 import { processBlock } from './processBlock.js';
 import { createHeaderFallback } from './lib/blockHeader.js';
+import { resolveConfirmations } from './lib/confirmations.js';
 
 if (!global.WebSocket) {
   global.WebSocket = WebSocket as any;
@@ -110,6 +111,20 @@ async function main() {
     throw new Error(`Invalid NTH_ROLE "${role}" (expected "tip" or "backfill")`);
   }
 
+  // Confirmation depth, checked before anything else so a bad setting refuses
+  // to start instead of publishing. NTH already needs block h+1 to fill the `N`
+  // tag, so it is inherently 1 deep; a reorg at that depth would publish an
+  // anchor that permanently disagrees with consensus, and DECK-0001 requires
+  // verifiers to reject exactly that. 6 is the conventional settlement depth.
+  //
+  // WARNING: 6 is also a hard floor now. ONOSENDAI's Seeds clock treats NTH's
+  // newest published anchor as the DECK-0008 section 4.1 clock height ("best
+  // chain tip minus 6"), which is only true while NTH waits for 6 or more
+  // confirmations. resolveConfirmations() refuses anything lower; see
+  // src/lib/confirmations.ts.
+  const { confirmations, warning: confirmationsWarning } = resolveConfirmations();
+  if (confirmationsWarning) console.error(confirmationsWarning);
+
   await acquireLock(role);
 
   const keySource = loadOrCreatePrivateKey();
@@ -142,12 +157,6 @@ async function main() {
   const notMinedDelayMs = parseIntEnv('NTH_NOT_MINED_DELAY_MS', 300_000);
   const backoffBaseMs = parseIntEnv('NTH_ERROR_BACKOFF_BASE_MS', 1_000);
   const backoffMaxMs = parseIntEnv('NTH_ERROR_BACKOFF_MAX_MS', 300_000);
-
-  // Confirmation depth. NTH already needs block h+1 to fill the `N` tag, so it
-  // is inherently 1 deep; a reorg at that depth would publish an anchor that
-  // permanently disagrees with consensus, and DECK-0001 requires verifiers to
-  // reject exactly that. 6 is the conventional settlement depth.
-  const confirmations = Math.max(1, parseIntEnv('NTH_CONFIRMATIONS', 6));
 
   // `backfill` walks historical blocks and stops before the frontier the tip
   // role owns, so the two roles never publish the same height.
@@ -210,6 +219,8 @@ async function main() {
       }
 
       // Confirmation gate: refuse to publish within `confirmations` of the tip.
+      // Do not weaken this check: ONOSENDAI's Seeds clock (DECK-0008 section 4.1)
+      // reads our newest anchor as "tip minus 6" (see src/lib/confirmations.ts).
       if (tipHeight - blockHeight < confirmations) {
         tipHeight = await bitcoinApi.getTipHeight();
 
