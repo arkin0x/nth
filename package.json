@@ -5,7 +5,7 @@
   "main": "index.js",
   "repository": "https://github.com/arkin0x/nth",
   "author": "arkin0x <npub1arkn0xxxll4llgy9qxkrncn3vc4l69s0dz8ef3zadykcwe7ax3dqrrh43w>",
-  "license": "Creative Commons Attribution-ShareAlike 4.0 International: https://creativecommons.org/licenses/by-sa/4.0/legalcode",
+  "license": "CC-BY-SA-4.0",
   "private": false,
   "type": "module",
   "dependencies": {
